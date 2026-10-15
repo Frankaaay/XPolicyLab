@@ -15,6 +15,8 @@ StereoTokAutoencoder 复用 FastWAM clean b856e4929c6a552540008808b188729361fa53
 发布授权：2026-10-15 用户明确确认创建 Frankaaay/XPolicyLab fork，在 frank/eighteen-preparation 分支仅提交任务清单15个文件。基线34d6135d609d46a10ccb81da24d5ddad0b4c1f7a。本提交记录此前验证和本次生产接入，不宣称全量latent已生成或训练已就绪；后续正式运行绑定本提交SHA，继续完成准备。
 # 原生全量并行生产
 
+用户批准LIBERO采用新左+新右，Wan对照使用同一新左，不再要求匹配发布旧图。新增utils/render_libero_stereo.py：逐个恢复记录states[i]，forward后同状态重取proprio并渲染两对相机/metric depth/K/外参，不step动作、不逆积分、不依赖states[i+1]；actions[i]原样保留，明确pre-action派生合同。包含全部原始帧和末帧，以.partial输出并在完整task结束后重命名。相机局部X基线6cm/2cm，渲染前后FULLPHYSICS逐值不变。此生产适配仍需真实完整episode验证后再批量运行。
+
 新增process_native_hdf5.py仅用于原生RoboTwin及LIBERO缺失缓存，复用process_data的VAE/text编码及tail mask。RoboTwin使用已准入2500条manifest的左目、xyzw EEF16及官方stride4/T形布局；LIBERO使用raw HDF5全部轨迹、垂直翻转至官方图像方向、action7/stride1/128分辨率。fps标签沿用作者50/60，与物理仿真频率不作等同声明。各并行区间重新编号为独立LeRobot数值+latent数据集，由原MultiLatentLeRobotDataset组合；原HDF5保留且source-episodes.json记录逐条映射，不创建重复视频或声称包含MP4。LIBERO Long直接复用既有官方缓存。
 
 用户确认：StereoTok正式路线改用u15853，原生路线仍用各模型原生Wan VAE；不得用StereoTok覆盖原生缓存。u15853 SHA256为61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae。
