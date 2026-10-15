@@ -29,3 +29,5 @@ StereoTokAutoencoder 复用 FastWAM clean b856e4929c6a552540008808b188729361fa53
 `4c9f4a52e49f13ec1805e7aab78e88a63f5cdcce` 在个人 clean remote clone 实际跑完 LIBERO object/demo_0，132 帧用时 8.584 秒，actions 保持不变，FULLPHYSICS 前后状态和双目基线检查通过。初次 EGL vendor 环境遗漏已通过复用现有 system-libs 配置解决，无依赖变更。四 worker 全量 40 task/2000 episode 渲染已在 DSW 启动，PID 231336；输出 `/mnt/workdir/frank/runs/eighteen-preparation-20261014/libero-fresh-paired-20261015/full`。一次健康检查各 worker 均持续完成 episode，GPU 60%，全量尚未完成。新输出为 opencv 图像方向，下游读取不可继续无条件垂直翻转。运行没有 backward/optimizer。
 
 十二项准备：LingBot codec 绑定选定 u15853；process_native_hdf5 增加对应 checkpoint 参数、真实右目读取、新 LIBERO opencv 图像方向及缓存 tokenizer_binding。AST 通过；依赖 FastWAM 新 loader 发布，未启动本轮全量编码或 GPU smoke。
+
+新增必要的 utils/export_libero_stereo_lerobot.py，将已经验收的新双目 HDF5 导出为现有 FastWAM v2.1 与 OpenWAM v3 合同，四路 RGB 无损视频共享，保留源 control_freq、所有帧和动作；OpenWAM 沿既有 native_delta_eef10/夹爪符号与0.08米宽度规则转换。尚待实际导出及 reader 验证。
