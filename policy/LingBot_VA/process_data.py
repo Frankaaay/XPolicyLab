@@ -168,6 +168,7 @@ def main():
     ap.add_argument("--output-dataset", required=True, help="Output LingBot-VA dataset dir.")
     ap.add_argument("--base-model", required=True, help="lingbot-va-base weights dir (vae/tokenizer/text_encoder).")
     ap.add_argument("--num-episodes", type=int, default=0, help="Cap episodes (0 = all).")
+    ap.add_argument("--episode-start", type=int, default=0, help="Start at this source metadata row; use separate outputs for parallel ranges.")
     ap.add_argument("--target-fps", type=float, default=12.5, help="Exact sampling fps for latents.")
     ap.add_argument("--image-size", type=int, default=256, help="VAE input resolution (square).")
     ap.add_argument("--device", default="cuda", help="Torch device.")
@@ -204,6 +205,9 @@ def main():
         raise ValueError("Target fps must exactly divide source fps; implicit relabeling is unsupported")
 
     episodes = [json.loads(l) for l in (src / "meta" / "episodes.jsonl").read_text().splitlines() if l.strip()]
+    if not 0 <= args.episode_start < len(episodes) or args.num_episodes < 0:
+        raise ValueError('Invalid episode range')
+    episodes = episodes[args.episode_start:]
     ep_stats = {json.loads(l)["episode_index"]: json.loads(l)
                 for l in (src / "meta" / "episodes_stats.jsonl").read_text().splitlines() if l.strip()}
     if args.num_episodes > 0:
