@@ -56,6 +56,7 @@ def main():
     p.add_argument('--source', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--base-model', required=True)
+    p.add_argument('--stereotok-checkpoint', help='Selected frozen u15853 export; reads matching right eyes')
     p.add_argument('--start', type=int, default=0)
     p.add_argument('--count', type=int, required=True)
     args = p.parse_args()
@@ -67,7 +68,8 @@ def main():
     args.output.mkdir(parents=True)
     (args.output / 'meta').mkdir()
     (args.output / 'source-episodes.json').write_text(json.dumps(rows, indent=2))
-    vae = load_vae(str(Path(args.base_model) / 'vae'), torch.bfloat16, 'cuda')
+    vae = load_vae(str(Path(args.base_model) / 'vae'), torch.bfloat16, 'cuda',
+                   stereotok_checkpoint=args.stereotok_checkpoint)
     wrapper = WanVAEStreamingWrapper(vae)
     tokenizer = load_tokenizer(str(Path(args.base_model) / 'tokenizer'))
     text_encoder = load_text_encoder(str(Path(args.base_model) / 'text_encoder'), torch.bfloat16, 'cuda')
@@ -102,21 +104,40 @@ def main():
             valid = np.asarray(frame_ids) < n
             ids = np.minimum(frame_ids, n - 1)
             for key, source_key, size in cameras:
+                right_frames = None
                 if args.kind == 'robotwin':
                     images = group[f'observation/{source_key}/rgb']
                     frames = np.stack([decode_image_bit(images[int(i)]) for i in ids])
+                    if args.stereotok_checkpoint:
+                        right_images = group[f'observation/{source_key}_right/rgb']
+                        right_frames = np.stack([decode_image_bit(right_images[int(i)]) for i in ids])
                 else:
                     images = group[f'obs/{source_key}']
-                    # LIBERO raw uses OpenGL origin; official videos flip vertically.
-                    frames = np.stack([images[int(i)][::-1] for i in ids])
+                    convention = handle['data'].attrs.get('macros_image_convention', 'opengl')
+                    if convention not in ('opencv', 'opengl'):
+                        raise ValueError(f'Unknown image convention: {convention}')
+                    frames = np.stack([images[int(i)] for i in ids])
+                    if convention == 'opengl':
+                        frames = frames[:, ::-1].copy()
+                    if args.stereotok_checkpoint:
+                        if handle['data'].attrs.get('pairing') != 'fresh-left+fresh-right':
+                            raise ValueError('StereoTok LIBERO requires admitted fresh paired data')
+                        right_images = group[f'obs/{source_key}_right']
+                        right_frames = np.stack([right_images[int(i)] for i in ids])
+                        if convention == 'opengl':
+                            right_frames = right_frames[:, ::-1].copy()
                 if len(images) != n:
                     raise ValueError('Image/action length mismatch')
-                latent, f, h, w = encode_video_latent(frames, vae, wrapper, 'cuda', torch.bfloat16, size)
+                if right_frames is not None and len(right_images) != n:
+                    raise ValueError('Right image/action length mismatch')
+                latent, f, h, w = encode_video_latent(frames, vae, wrapper, 'cuda', torch.bfloat16, size,
+                                                     right_rgb=right_frames)
                 rec = dict(latent=latent, latent_num_frames=f, latent_height=h, latent_width=w,
                            video_num_frames=len(frame_ids), video_height=size[0], video_width=size[1],
                            text_emb=text_cache[row['task']], text=row['task'], frame_ids=frame_ids,
                            frame_valid=valid.tolist(), start_frame=0, end_frame=n,
-                           fps=fps / stride, ori_fps=fps)
+                           fps=fps / stride, ori_fps=fps,
+                           tokenizer_binding=getattr(vae, 'binding', {'kind': 'official-wan'}))
                 dest = args.output / 'latents' / chunk / ('observation.images.' + key)
                 dest.mkdir(parents=True, exist_ok=True)
                 torch.save(rec, dest / f'episode_{index:06d}_0_{n}.pth')
