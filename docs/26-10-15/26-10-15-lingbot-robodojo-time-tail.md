@@ -15,5 +15,9 @@ StereoTokAutoencoder 复用 FastWAM clean b856e4929c6a552540008808b188729361fa53
 发布授权：2026-10-15 用户明确确认创建 Frankaaay/XPolicyLab fork，在 frank/eighteen-preparation 分支仅提交任务清单15个文件。基线34d6135d609d46a10ccb81da24d5ddad0b4c1f7a。本提交记录此前验证和本次生产接入，不宣称全量latent已生成或训练已就绪；后续正式运行绑定本提交SHA，继续完成准备。
 # 原生全量并行生产
 
+新增process_native_hdf5.py仅用于原生RoboTwin及LIBERO缺失缓存，复用process_data的VAE/text编码及tail mask。RoboTwin使用已准入2500条manifest的左目、xyzw EEF16及官方stride4/T形布局；LIBERO使用raw HDF5全部轨迹、垂直翻转至官方图像方向、action7/stride1/128分辨率。fps标签沿用作者50/60，与物理仿真频率不作等同声明。各并行区间重新编号为独立LeRobot数值+latent数据集，由原MultiLatentLeRobotDataset组合；原HDF5保留且source-episodes.json记录逐条映射，不创建重复视频或声称包含MP4。LIBERO Long直接复用既有官方缓存。
+
+用户确认：StereoTok正式路线改用u15853，原生路线仍用各模型原生Wan VAE；不得用StereoTok覆盖原生缓存。u15853 SHA256为61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae。
+
 用户要求原生九路线优先，复用既有缓存，缺缓存使用闲时GPU并行。process_data.py新增episode-start参数，与既有num-episodes组合选择不重叠连续区间；每个进程使用独立空输出目录，保留原episode索引、采样和编码逻辑。分片不能直接当完整训练集，完成后合并元数据及各episode文件链接，再使用统一训练目录。计划3500条分4份，每份875条，不改变数据语义。
 
