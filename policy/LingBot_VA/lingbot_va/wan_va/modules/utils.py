@@ -13,7 +13,11 @@ def load_vae(
     vae_path,
     torch_dtype,
     torch_device,
+    stereotok_checkpoint=None,
 ):
+    if stereotok_checkpoint is not None:
+        from .stereotok import StereoTokAutoencoder
+        return StereoTokAutoencoder(stereotok_checkpoint, torch_device)
     vae = AutoencoderKLWan.from_pretrained(
         vae_path,
         torch_dtype=torch_dtype,
@@ -68,6 +72,15 @@ class WanVAEStreamingWrapper:
 
     def __init__(self, vae_model):
         self.vae = vae_model
+        self.stereo = bool(getattr(vae_model, 'requires_stereo', False))
+        if self.stereo:
+            from fastwam.models.wan22.stereotok.vae2_2 import count_conv3d
+            self.encoder = vae_model.model.encoder
+            self.quant_conv = vae_model.model.conv1
+            self.enc_conv_num = count_conv3d(self.encoder)
+            self.geometry_conv_num = count_conv3d(vae_model.model.fusion.downsamples)
+            self.clear_cache()
+            return
         self.encoder = vae_model.encoder
         self.quant_conv = vae_model.quant_conv
 
@@ -84,8 +97,41 @@ class WanVAEStreamingWrapper:
 
     def clear_cache(self):
         self.feat_cache = [None] * self.enc_conv_num
+        if self.stereo:
+            self.geometry_cache = [None] * self.geometry_conv_num
+            self.first_chunk = True
+            self.stream_shape = None
 
-    def encode_chunk(self, x_chunk):
+    @torch.no_grad()
+    def encode_chunk(self, x_chunk, right_chunk=None):
+        if self.stereo:
+            if right_chunk is None or x_chunk.shape != right_chunk.shape or x_chunk.ndim != 5:
+                raise ValueError('StereoTok streaming requires matching real [B,3,T,H,W] eyes')
+            expected = 1 if self.first_chunk else 4
+            if x_chunk.shape[1] != 3 or x_chunk.shape[2] != expected:
+                raise ValueError(f'StereoTok stream needs {expected} frames in this chunk')
+            shape = (x_chunk.shape[0], *x_chunk.shape[-2:])
+            if self.stream_shape is not None and shape != self.stream_shape:
+                raise ValueError('Reset the stream before changing camera batch or resolution')
+            if not torch.isfinite(x_chunk).all() or not torch.isfinite(right_chunk).all():
+                raise ValueError('Nonfinite stereo pixels')
+            if x_chunk.abs().max() > 1.001 or right_chunk.abs().max() > 1.001:
+                raise ValueError('StereoTok inputs must be normalized to [-1,1]')
+            model = self.vae.model
+            left, right = x_chunk.float(), right_chunk.float()
+            mask = torch.ones(left.shape[0], 2, *left.shape[-2:], dtype=torch.bool, device=left.device)
+            with torch.autocast(device_type=left.device.type, enabled=False):
+                probabilities = model.fusion.prepare(left, right, mask, model.fusion.max_disparity)
+                x = patchify(torch.cat((left, right), dim=0), 2)
+                out = self.encoder(x, feat_cache=self.feat_cache, feat_idx=[0],
+                    fusion=model.fusion, content_mask=mask, disparity=model.fusion.max_disparity,
+                    match_probabilities=probabilities, geometry_cache=self.geometry_cache)
+                result = self.quant_conv(out)
+            self.first_chunk = False
+            self.stream_shape = shape
+            return result
+        if right_chunk is not None:
+            raise ValueError('Right-eye input supplied to native LingBot VAE')
         if hasattr(self.vae.config,
                    "patch_size") and self.vae.config.patch_size is not None:
             x_chunk = patchify(x_chunk, self.vae.config.patch_size)

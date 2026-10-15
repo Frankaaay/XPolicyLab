@@ -236,6 +236,7 @@ class Trainer:
             noisy_cond_prob=0.0)
 
         latent_dict['text_emb'] = batch_dict['text_emb']
+        latent_dict['latents_mask'] = batch_dict['latents_mask']
         action_dict['text_emb'] = batch_dict['text_emb']
         action_dict['actions_mask'] = batch_dict['actions_mask']
 
@@ -270,12 +271,14 @@ class Trainer:
         # Frame-wise video loss calculation
         latent_loss = F.mse_loss(latent_pred.float(), input_dict['latent_dict']['targets'].float().detach(), reduction='none')
         latent_loss = latent_loss * latent_loss_weight[:, None, :, None, None]
+        latent_mask = input_dict['latent_dict']['latents_mask'].float()
+        latent_loss = latent_loss * latent_mask
         # Permute to (B, F, H, W, C) and flatten to (B*F, H*W*C)
         latent_loss = latent_loss.permute(0, 2, 3, 4, 1)  # (B, C, F, H, W) -> (B, F, H, W, C)
         latent_loss = latent_loss.flatten(0, 1).flatten(1)  # (B, F, H, W, C) -> (B*F, H*W*C)
         # Sum per frame and compute mask per frame
         latent_loss_per_frame = latent_loss.sum(dim=1)  # (B*F,)
-        latent_mask_per_frame = torch.ones_like(latent_loss).sum(dim=1)  # (B*F,)
+        latent_mask_per_frame = latent_mask.permute(0, 2, 3, 4, 1).flatten(0, 1).flatten(1).sum(dim=1)
         latent_loss = (latent_loss_per_frame / (latent_mask_per_frame + 1e-6)).mean()
 
         # Frame-wise action loss calculation

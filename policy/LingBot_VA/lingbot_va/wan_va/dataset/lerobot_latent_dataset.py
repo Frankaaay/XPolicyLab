@@ -187,7 +187,7 @@ class LatentLeRobotDataset(LeRobotDataset):
                 cur_path / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth"
             )
             if not os.path.exists(latent_file):
-                return False
+                raise FileNotFoundError(f'Missing required episode latent: {latent_file}')
         return True
 
     def _get_global_idx(self, episode_index: int, local_index: int):
@@ -251,6 +251,20 @@ class LatentLeRobotDataset(LeRobotDataset):
             latents = cat_latent,
             text_emb = text_emb,
         )
+        key = self.used_video_keys[0]
+        valid = data_dict.get(f"{key}.frame_valid")
+        if valid is None:
+            latent_valid = torch.ones(cat_latent.shape[0], dtype=torch.bool)
+        else:
+            for camera in self.used_video_keys:
+                if data_dict[f"{camera}.frame_valid"] != valid:
+                    raise ValueError("Camera tail masks must agree")
+            valid = torch.as_tensor(valid, dtype=torch.bool)
+            latent_valid = torch.cat((valid[:1], valid[1:].reshape(-1, 4).any(dim=1)))
+            if len(latent_valid) != cat_latent.shape[0]:
+                raise ValueError("Latent and sampled-frame mask lengths disagree")
+        out_dict['latents_mask'] = latent_valid[None, :, None, None].expand(
+            cat_latent.shape[3], -1, cat_latent.shape[1], cat_latent.shape[2])
         return out_dict
     
     def _action_post_process(self, local_start_frame, local_end_frame, latent_frame_ids, action):
@@ -261,13 +275,19 @@ class LatentLeRobotDataset(LeRobotDataset):
             left_action = get_relative_pose(action[:, :7])
             right_action = get_relative_pose(action[:, 8:15])
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
-        action = np.pad(action, pad_width=((frame_stride * 4, 0), (0, 0)), mode='constant', constant_values=0)
+        prefix = frame_stride * 4
+        action_mask = np.ones_like(action, dtype='bool')
+        action = np.pad(action, ((prefix, 0), (0, 0)), mode='constant')
+        action_mask = np.pad(action_mask, ((prefix, 0), (0, 0)), mode='constant')
 
         latent_frame_num = (len(latent_frame_ids) - 1) // 4 + 1
         required_action_num = latent_frame_num * frame_stride * 4
 
         action = action[:required_action_num]
-        action_mask = np.ones_like(action, dtype='bool')
+        action_mask = action_mask[:required_action_num]
+        padding = required_action_num - len(action)
+        action = np.pad(action, ((0, padding), (0, 0)), mode='constant')
+        action_mask = np.pad(action_mask, ((0, padding), (0, 0)), mode='constant')
         assert action.shape[0] == required_action_num
 
 

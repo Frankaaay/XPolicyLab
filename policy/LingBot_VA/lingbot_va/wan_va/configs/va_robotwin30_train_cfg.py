@@ -26,7 +26,8 @@ va_robotwin30_cfg.env_type = "none"
 va_robotwin30_cfg.height = 256
 va_robotwin30_cfg.width = 256
 va_robotwin30_cfg.action_dim = 30
-va_robotwin30_cfg.action_per_frame = 12
+# RoboDojo 25 Hz actions / stride-2 video / four video frames per latent.
+va_robotwin30_cfg.action_per_frame = 8
 
 va_robotwin30_cfg.obs_cam_keys = [
     "observation.images.cam_high",

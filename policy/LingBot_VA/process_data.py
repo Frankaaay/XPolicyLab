@@ -81,19 +81,28 @@ def read_video_frames(mp4_path: Path) -> np.ndarray:
 
 
 def sample_frame_ids(num_frames: int, stride: int) -> list:
-    """Sample every `stride`-th frame, then truncate so (n-1) % temporal_rate == 0."""
-    ids = list(range(0, num_frames, stride))
-    n = len(ids)
-    n = ((n - 1) // VAE_TEMPORAL_RATE) * VAE_TEMPORAL_RATE + 1
-    return ids[:n]
+    """Regular sample grid with enough padded tail capacity for every action."""
+    if num_frames < 1 or stride < 1:
+        raise ValueError("Frame count and stride must be positive")
+    action_block = stride * VAE_TEMPORAL_RATE
+    blocks = (num_frames + action_block - 1) // action_block
+    return list(range(0, blocks * action_block + 1, stride))
 
 
 @torch.no_grad()
-def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, size):
+def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, size, right_rgb=None):
     """frames_rgb: (n, H, W, 3) uint8 -> normalized VAE latent, plus latent dims."""
     x = torch.from_numpy(frames_rgb).float().permute(3, 0, 1, 2)  # (3, n, H, W)
-    x = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+    image_size = (size, size) if isinstance(size, int) else tuple(size)
+    x = F.interpolate(x, size=image_size, mode="bilinear", align_corners=False)
     x = (x / 255.0 * 2.0 - 1.0).unsqueeze(0).to(device).to(dtype)  # (1, 3, n, H, W)
+    right = None
+    if right_rgb is not None:
+        if right_rgb.shape != frames_rgb.shape:
+            raise ValueError('Left/right frame arrays must match')
+        right = torch.from_numpy(right_rgb).float().permute(3, 0, 1, 2)
+        right = F.interpolate(right, size=image_size, mode='bilinear', align_corners=False)
+        right = (right / 255.0 * 2.0 - 1.0).unsqueeze(0).to(device).to(dtype)
 
     wrapper.clear_cache()
     outs, t, first = [], 0, True
@@ -102,7 +111,7 @@ def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, siz
         chunk = x[:, :, t:t + step]
         if chunk.shape[2] == 0:
             break
-        outs.append(wrapper.encode_chunk(chunk))
+        outs.append(wrapper.encode_chunk(chunk, right_chunk=None if right is None else right[:, :, t:t + step]))
         t += step
         first = False
     enc = torch.cat(outs, dim=2)
@@ -159,24 +168,40 @@ def main():
     ap.add_argument("--output-dataset", required=True, help="Output LingBot-VA dataset dir.")
     ap.add_argument("--base-model", required=True, help="lingbot-va-base weights dir (vae/tokenizer/text_encoder).")
     ap.add_argument("--num-episodes", type=int, default=0, help="Cap episodes (0 = all).")
-    ap.add_argument("--target-fps", type=int, default=10, help="Target sampling fps for latents.")
+    ap.add_argument("--target-fps", type=float, default=12.5, help="Exact sampling fps for latents.")
     ap.add_argument("--image-size", type=int, default=256, help="VAE input resolution (square).")
     ap.add_argument("--device", default="cuda", help="Torch device.")
+    ap.add_argument("--stereotok-checkpoint", help="Frozen u8000 student export; requires real right cameras.")
+    ap.add_argument("--right-camera-map", help="JSON mapping each configured left camera to its true right eye.")
     args = ap.parse_args()
 
     src = Path(args.source_dataset).resolve()
     out = Path(args.output_dataset).resolve()
+    if out == src or (out.exists() and any(out.iterdir())):
+        raise FileExistsError('Use a new empty output directory; source and existing outputs are preserved')
     base = Path(args.base_model).resolve()
     device = args.device
     dtype = torch.bfloat16
 
     info = json.loads((src / "meta" / "info.json").read_text())
+    right_camera_map = json.loads(Path(args.right_camera_map).read_text()) if args.right_camera_map else None
+    if bool(args.stereotok_checkpoint) != bool(right_camera_map):
+        raise ValueError('StereoTok checkpoint and admitted right-camera map must be supplied together')
+    if right_camera_map is not None:
+        if set(right_camera_map) != set(LATENT_CAM_KEYS) or len(set(right_camera_map.values())) != len(LATENT_CAM_KEYS):
+            raise ValueError('Right-camera map must cover each view exactly once')
+        for left, right in right_camera_map.items():
+            if right in LATENT_CAM_KEYS or info['features'].get(right, {}).get('dtype') != 'video':
+                raise ValueError(f'Missing independent right-eye video feature for {left}')
     if info.get("codebase_version") != "v2.1":
-        print(f"[process_data] WARNING: source codebase {info.get('codebase_version')} != v2.1; "
-              "the trainer loader expects v2.1.", flush=True)
+        raise ValueError('The production converter requires LeRobot v2.1')
     ori_fps = int(info["fps"])
     chunks_size = int(info.get("chunks_size", 1000))
+    if args.target_fps <= 0:
+        raise ValueError("Target fps must be positive")
     stride = max(1, round(ori_fps / args.target_fps))
+    if args.target_fps <= 0 or not np.isclose(ori_fps / stride, args.target_fps):
+        raise ValueError("Target fps must exactly divide source fps; implicit relabeling is unsupported")
 
     episodes = [json.loads(l) for l in (src / "meta" / "episodes.jsonl").read_text().splitlines() if l.strip()]
     ep_stats = {json.loads(l)["episode_index"]: json.loads(l)
@@ -192,7 +217,7 @@ def main():
     (out / "meta").mkdir(parents=True, exist_ok=True)
 
     print("[process_data] loading Wan2.2 VAE + text encoder ...", flush=True)
-    vae = load_vae(str(base / "vae"), dtype, device)
+    vae = load_vae(str(base / "vae"), dtype, device, stereotok_checkpoint=args.stereotok_checkpoint)
     wrapper = WanVAEStreamingWrapper(vae)
     tokenizer = load_tokenizer(str(base / "tokenizer"))
     text_encoder = load_text_encoder(str(base / "text_encoder"), dtype, device)
@@ -242,11 +267,19 @@ def main():
             if not mp4.exists():
                 raise FileNotFoundError(f"missing source video: {mp4}")
             frames = read_video_frames(mp4)
-            n_avail = min(len(frames), length)
-            frame_ids = sample_frame_ids(n_avail, stride)
-            clip = frames[frame_ids]
+            if len(frames) != length or len(df) != length:
+                raise ValueError(f"Episode {ep_idx}: video/parquet/metadata length mismatch")
+            frame_ids = sample_frame_ids(length, stride)
+            frame_valid = np.asarray(frame_ids) < length
+            clip = frames[np.minimum(frame_ids, length - 1)]
+            right_clip = None
+            if right_camera_map is not None:
+                right_frames = read_video_frames(source_video_path(src, info, right_camera_map[cam], ep_idx, ep_chunk))
+                if len(right_frames) != length:
+                    raise ValueError(f'Episode {ep_idx}: right-eye length mismatch')
+                right_clip = right_frames[np.minimum(frame_ids, length - 1)]
             latent, f_lat, h_lat, w_lat = encode_video_latent(
-                clip, vae, wrapper, device, dtype, args.image_size)
+                clip, vae, wrapper, device, dtype, args.image_size, right_rgb=right_clip)
 
             rec = {
                 "latent": latent,
@@ -259,6 +292,7 @@ def main():
                 "text_emb": text_emb,
                 "text": task,
                 "frame_ids": frame_ids,
+                "frame_valid": frame_valid.tolist(),
                 "start_frame": 0,
                 "end_frame": length,
                 "fps": args.target_fps,
@@ -306,12 +340,10 @@ def main():
                 continue
             src_v = source_video_path(src, info, cam, ep_idx, ep_chunk)
             if not src_v.exists():
-                continue
+                raise FileNotFoundError(src_v)
             dst_v = out / info["video_path"].format(
                 episode_chunk=ep_chunk, video_key=cam, episode_index=ep_idx)
             dst_v.parent.mkdir(parents=True, exist_ok=True)
-            if dst_v.is_symlink() or dst_v.exists():
-                dst_v.unlink()
             os.symlink(src_v, dst_v)
 
     print(f"[process_data] done. dataset ready at: {out}", flush=True)

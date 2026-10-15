@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import torch
+import os
 from easydict import EasyDict
 
 va_shared_cfg = EasyDict()
@@ -13,3 +14,4 @@ va_shared_cfg.save_root = './train_out'
 va_shared_cfg.patch_size = (1, 2, 2)
 
 va_shared_cfg.enable_offload = False
+va_shared_cfg.stereotok_checkpoint = os.environ.get('LINGBOT_STEREOTOK_CHECKPOINT')

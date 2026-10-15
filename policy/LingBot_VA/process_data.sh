@@ -40,8 +40,13 @@ output_dataset="${LINGBOT_VA_DATASET_PATH:-${POLICY_DIR}/data/${data_setting}}"
 base_model="${LINGBOT_VA_BASE_MODEL_PATH:?set LINGBOT_VA_BASE_MODEL_PATH to the lingbot-va-base weights dir}"
 
 gpu_id="${LINGBOT_VA_PROCESS_GPU:-0}"
-target_fps="${LINGBOT_VA_TARGET_FPS:-10}"
+target_fps="${LINGBOT_VA_TARGET_FPS:-12.5}"
 image_size="${LINGBOT_VA_IMAGE_SIZE:-256}"
+codec_args=()
+if [[ -n "${LINGBOT_STEREOTOK_CHECKPOINT:-}" ]]; then
+  codec_args+=(--stereotok-checkpoint "${LINGBOT_STEREOTOK_CHECKPOINT}"
+    --right-camera-map "${LINGBOT_RIGHT_CAMERA_MAP:?set the admitted right-camera mapping JSON}")
+fi
 
 echo "[LingBot_VA] source_dataset=${source_dataset}"
 echo "[LingBot_VA] output_dataset=${output_dataset}"
@@ -55,6 +60,6 @@ python "${POLICY_DIR}/process_data.py" \
   --base-model "${base_model}" \
   --num-episodes "${expert_data_num}" \
   --target-fps "${target_fps}" \
-  --image-size "${image_size}"
+  --image-size "${image_size}" "${codec_args[@]}"
 
 echo "[LingBot_VA] export LINGBOT_VA_DATASET_PATH=${output_dataset}"
