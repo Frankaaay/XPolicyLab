@@ -8,16 +8,16 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, get_optimizer_state_dict, set_optimizer_state_dict, StateDictOptions
 from safetensors.torch import save_file, load_file
 import logging
 logger = logging.getLogger(__name__)
 
 class Samples(Dataset):
-    def __len__(self): return 13
+    def __len__(self): return 17
     def __getitem__(self, index):
-        return torch.tensor([index / 13, random.random(), float(np.random.rand()), float(torch.rand(()))])
+        return torch.tensor([index / 17, random.random(), float(np.random.rand()), float(torch.rand(()))])
 
 def main():
     source = Path(__file__).resolve().parents[1] / 'policy/LingBot_VA/lingbot_va/wan_va/train.py'
@@ -27,20 +27,23 @@ def main():
     cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
     exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), 'exec'), globals())
     out = Path(os.environ['RESUME_TEST_OUTPUT']); out.mkdir(parents=True, exist_ok=True)
-    torch.cuda.set_device(0)
-    dist.init_process_group('nccl', init_method='tcp://127.0.0.1:29687', rank=0, world_size=1)
+    rank=int(os.environ.get('RANK',0)); world=int(os.environ.get('WORLD_SIZE',1)); local=int(os.environ.get('LOCAL_RANK',0))
+    torch.cuda.set_device(local)
+    if 'RANK' in os.environ: dist.init_process_group('nccl')
+    else: dist.init_process_group('nccl', init_method='tcp://127.0.0.1:29687', rank=0, world_size=1)
     from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
     def make():
         t = Trainer()
-        t.config = SimpleNamespace(world_size=1, rank=0, local_rank=0, batch_size=2, load_worker=2)
-        t.device = torch.device('cuda:0'); t.step = 0
+        t.config = SimpleNamespace(world_size=world, rank=rank, local_rank=local, batch_size=2, load_worker=2)
+        t.device = torch.device(f'cuda:{local}'); t.step = 0
         t.transformer = torch.nn.Sequential(torch.nn.Linear(4, 16), torch.nn.Dropout(.2), torch.nn.Linear(16, 1)).cuda()
         t.transformer.config = {}
         fully_shard(t.transformer, mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32))
         t.optimizer = torch.optim.AdamW(t.transformer.parameters(), lr=.001, fused=True)
         t.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(t.optimizer, lambda step: min((step+1)/5, 1))
         t.gradient_accumulation_steps = 2
-        t.train_loader = DataLoader(Samples(), batch_size=2, shuffle=True, num_workers=2, generator=torch.Generator().manual_seed(42))
+        dataset=Samples(); sampler=DistributedSampler(dataset, num_replicas=world, rank=rank, seed=42)
+        t.train_loader = DataLoader(dataset, batch_size=2, sampler=sampler, num_workers=2, generator=torch.Generator().manual_seed(42+rank))
         t.train_loader_iter = None; t.data_epoch = 0; t.data_batches = 0; t.epoch_rng = None
         t.save_dir = out
         return t
@@ -81,7 +84,8 @@ def main():
     try: b._load_training_state(out/'missing')
     except RuntimeError: pass
     else: raise AssertionError('missing checkpoint accepted')
-    result=dict(passed=True,fsdp2=True,world_size=1,optimizer_steps=6,save_step=2,resumed_steps=4,worker_count=2,gradient_accumulation=2,exact=['batches','losses','fp32_weights','adamw_state','scheduler','step','epoch'],scope='small model using production Trainer checkpoint methods')
-    (out/'result.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result))
+    result=dict(passed=True,fsdp2=True,world_size=world,optimizer_steps=6,save_step=2,resumed_steps=4,worker_count=2,gradient_accumulation=2,exact=['batches','losses','fp32_weights','adamw_state','scheduler','step','epoch'],scope='small model using production Trainer checkpoint methods')
+    if rank==0:
+        (out/'result.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result))
     dist.destroy_process_group()
 if __name__=='__main__': main()
