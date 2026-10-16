@@ -16,6 +16,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
+    set_model_state_dict,
     StateDictOptions,
 )
 from safetensors.torch import save_file, load_file
@@ -386,16 +387,23 @@ class Trainer:
                 transformer_dir = checkpoint_dir / 'transformer'
                 transformer_dir.mkdir()
                 # Preserve master precision; a bf16 export cannot provide exact continuation.
-                save_file(model_state, transformer_dir / 'diffusion_pytorch_model.safetensors')
+                save_file({k: v.to(torch.bfloat16) for k, v in model_state.items()},
+                          transformer_dir / 'diffusion_pytorch_model.safetensors')
                 config_dict = dict(self.transformer.config)
                 config_dict.pop('_name_or_path', None)
                 (transformer_dir / 'config.json').write_text(json.dumps(config_dict))
-                torch.save(dict(step=self.step, optimizer_state_dict=optim_state,
+                torch.save(dict(step=self.step, model_state_dict=model_state, optimizer_state_dict=optim_state,
                                 scheduler=self.lr_scheduler.state_dict(), ranks=rank_states,
                                 contract=self._resume_contract()), checkpoint_dir / 'training_state.pt')
                 marker = checkpoint_dir / 'complete.json.tmp'
                 marker.write_text(json.dumps(dict(step=self.step, format_version=1)))
                 os.replace(marker, checkpoint_dir / 'complete.json')
+                # Publish the new complete state before retiring old resume payloads.
+                # Historical bf16 exports remain available for evaluation.
+                for old in self.save_dir.glob('checkpoint_step_*'):
+                    if old != checkpoint_dir and old.is_dir() and not old.is_symlink():
+                        (old / 'complete.json').unlink(missing_ok=True)
+                        (old / 'training_state.pt').unlink(missing_ok=True)
             except Exception as exc:
                 error[0] = repr(exc)
         if dist.is_initialized():
@@ -410,6 +418,8 @@ class Trainer:
         state = torch.load(checkpoint_dir / 'training_state.pt', map_location='cpu', weights_only=False)
         if state['contract'] != self._resume_contract():
             raise RuntimeError('Resume config, world size or data contract changed')
+        set_model_state_dict(self.transformer, state['model_state_dict'],
+                             options=StateDictOptions(full_state_dict=True, strict=True))
         set_optimizer_state_dict(self.transformer, self.optimizer,
                                  optim_state_dict=state['optimizer_state_dict'],
                                  options=StateDictOptions(full_state_dict=True, strict=True))

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, get_optimizer_state_dict, set_optimizer_state_dict, StateDictOptions
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, get_optimizer_state_dict, set_optimizer_state_dict, set_model_state_dict, StateDictOptions
 from safetensors.torch import save_file, load_file
 import logging
 logger = logging.getLogger(__name__)
@@ -81,6 +81,14 @@ def main():
     equal(expected,actual); equal(weights,get_model_state_dict(b.transformer,options=opts))
     equal(optimizer,get_optimizer_state_dict(b.transformer,b.optimizer,options=opts)); equal(scheduler,b.lr_scheduler.state_dict())
     assert b.step==a.step==6 and b.data_epoch==a.data_epoch
+    b.save_checkpoint()
+    assert not (out/'checkpoint_step_2/training_state.pt').exists()
+    assert not (out/'checkpoint_step_2/complete.json').exists()
+    assert (out/'checkpoint_step_6/complete.json').is_file()
+    assert all(t.dtype == torch.bfloat16 for t in load_file(out/'checkpoint_step_2/transformer/diffusion_pytorch_model.safetensors').values())
+    c=make(); c._load_training_state(out/'checkpoint_step_6')
+    equal(weights,get_model_state_dict(c.transformer,options=opts))
+    equal(optimizer,get_optimizer_state_dict(c.transformer,c.optimizer,options=opts))
     try: b._load_training_state(out/'missing')
     except RuntimeError: pass
     else: raise AssertionError('missing checkpoint accepted')
