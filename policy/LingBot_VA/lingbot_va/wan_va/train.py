@@ -398,12 +398,19 @@ class Trainer:
                 marker = checkpoint_dir / 'complete.json.tmp'
                 marker.write_text(json.dumps(dict(step=self.step, format_version=1)))
                 os.replace(marker, checkpoint_dir / 'complete.json')
-                # Publish the new complete state before retiring old resume payloads.
-                # Historical bf16 exports remain available for evaluation.
-                for old in self.save_dir.glob('checkpoint_step_*'):
-                    if old != checkpoint_dir and old.is_dir() and not old.is_symlink():
-                        (old / 'complete.json').unlink(missing_ok=True)
-                        (old / 'training_state.pt').unlink(missing_ok=True)
+                # Retain the latest two completed exports and full recovery states.
+                completed = sorted(
+                    (p for p in self.save_dir.glob('checkpoint_step_*')
+                     if p.is_dir() and not p.is_symlink() and (p / 'complete.json').is_file()),
+                    key=lambda p: int(p.name.removeprefix('checkpoint_step_')),
+                )
+                for old in completed[:-2]:
+                    for payload in sorted(old.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+                        if payload.is_file() or payload.is_symlink():
+                            payload.unlink()
+                        elif payload.is_dir():
+                            payload.rmdir()
+                    old.rmdir()
             except Exception as exc:
                 error[0] = repr(exc)
         if dist.is_initialized():
