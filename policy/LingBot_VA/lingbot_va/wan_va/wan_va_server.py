@@ -64,6 +64,7 @@ class VA_Server:
             torch_dtype=self.dtype,
             torch_device='cpu' if self.enable_offload else self.device,
             stereotok_checkpoint=getattr(job_config, 'stereotok_checkpoint', None),
+            stereotok_input_mode=getattr(job_config, 'stereotok_input_mode', 'stereo'),
         )
         self.streaming_vae = WanVAEStreamingWrapper(self.vae)
 
@@ -96,7 +97,7 @@ class VA_Server:
         self.env_type = job_config.env_type
         self.streaming_vae_half = None
         if self.env_type == 'robotwin_tshape':
-            vae_half = self.vae if getattr(self.vae, 'requires_stereo', False) else load_vae(
+            vae_half = self.vae if getattr(self.vae, 'binding', {}).get('format') == 'stereotok-student-v3' else load_vae(
                 os.path.join(job_config.wan22_pretrained_model_name_or_path,
                              'vae'),
                 torch_dtype=self.dtype,

@@ -7,8 +7,8 @@ from fastwam.models.wan22.stereotok_vae import StereoTokVAE
 
 
 class StereoTokAutoencoder(StereoTokVAE):
-    def __init__(self, checkpoint, device):
-        super().__init__(checkpoint, device)
+    def __init__(self, checkpoint, device, input_mode="stereo"):
+        super().__init__(checkpoint, device, input_mode=input_mode)
         if self.binding['sha256'] != '61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae':
             raise ValueError('LingBot StereoTok requires the selected u15853 export')
         mean, inverse_std = latent_scale('cpu')

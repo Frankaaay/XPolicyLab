@@ -20,6 +20,35 @@ def production_function(path, name, namespace):
 
 
 class TailContractTest(unittest.TestCase):
+    def test_mono_stream_matches_native_posterior_and_resets(self):
+        from fastwam.models.wan22.stereotok.vae2_2 import WanVAE_
+        model = WanVAE_(dim=8, dec_dim=8, z_dim=48, dim_mult=[1, 2, 4, 4],
+                        num_res_blocks=1, temperal_downsample=[False, True, True])
+        model.fusion = torch.nn.Module()
+        model.fusion.downsamples = torch.nn.Identity()
+        model.eval().requires_grad_(False)
+        path = ROOT / 'lingbot_va/wan_va/modules/utils.py'
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        nodes = [n for n in tree.body if getattr(n, 'name', '') in ('patchify', 'WanVAEStreamingWrapper')]
+        scope = {'torch': torch}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), scope)
+        codec = SimpleNamespace(model=model, requires_stereo=False,
+                                binding={'format': 'stereotok-student-v3'})
+        wrapper = scope['WanVAEStreamingWrapper'](codec)
+        pixels = torch.rand(2, 3, 9, 32, 32) * 2 - 1
+        with torch.no_grad():
+            mean, logvar = model.encode_posterior(pixels)
+        for _ in range(2):
+            wrapper.clear_cache()
+            encoded = torch.cat([wrapper.encode_chunk(pixels[:, :, :1]),
+                                 wrapper.encode_chunk(pixels[:, :, 1:5]),
+                                 wrapper.encode_chunk(pixels[:, :, 5:9])], dim=2)
+            torch.testing.assert_close(encoded, torch.cat((mean, logvar), dim=1))
+        with self.assertRaisesRegex(ValueError, 'right eyes'):
+            wrapper.encode_chunk(pixels[:, :, 1:5], pixels[:, :, 1:5])
+        with self.assertRaisesRegex(ValueError, 'Reset'):
+            wrapper.encode_chunk(pixels[:1, :, 1:5])
+
     def test_all_short_lengths_keep_actions_and_sampled_frames(self):
         sample = production_function(ROOT / "process_data.py", "sample_frame_ids", {"VAE_TEMPORAL_RATE": 4})
         process = production_function(

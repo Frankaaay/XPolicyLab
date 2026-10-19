@@ -128,6 +128,14 @@ class LatentLeRobotDataset(LeRobotDataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=False
         )
+        binding = self.meta.info.get('vae_binding', {})
+        mono_cache = binding.get('input_mode') == 'mono-left'
+        mono_config = getattr(config, 'stereotok_input_mode', 'stereo') == 'mono-left'
+        if mono_cache != mono_config:
+            raise ValueError('LingBot config and cache disagree on StereoTok mono-left input')
+        if mono_config and (not getattr(config, 'stereotok_checkpoint', None) or
+                            binding.get('sha256') != '61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae'):
+            raise ValueError('LingBot mono-left cache must use the selected u15853 export')
         if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
             episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
             self.stats = aggregate_stats(episodes_stats)

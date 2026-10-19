@@ -104,22 +104,26 @@ def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, siz
         right = F.interpolate(right, size=image_size, mode='bilinear', align_corners=False)
         right = (right / 255.0 * 2.0 - 1.0).unsqueeze(0).to(device).to(dtype)
 
-    wrapper.clear_cache()
-    outs, t, first = [], 0, True
-    while t < x.shape[2]:
-        step = 1 if first else VAE_TEMPORAL_RATE
-        chunk = x[:, :, t:t + step]
-        if chunk.shape[2] == 0:
-            break
-        outs.append(wrapper.encode_chunk(chunk, right_chunk=None if right is None else right[:, :, t:t + step]))
-        t += step
-        first = False
-    enc = torch.cat(outs, dim=2)
-    mu, _ = torch.chunk(enc, 2, dim=1)  # (1, C, F, H, W)
+    if getattr(vae, 'binding', {}).get('input_mode') == 'mono-left':
+        # Use the same default optimized posterior as policy training; no right eye.
+        mu_norm = vae.encode(x, device, right_videos=right)
+    else:
+        wrapper.clear_cache()
+        outs, t, first = [], 0, True
+        while t < x.shape[2]:
+            step = 1 if first else VAE_TEMPORAL_RATE
+            chunk = x[:, :, t:t + step]
+            if chunk.shape[2] == 0:
+                break
+            outs.append(wrapper.encode_chunk(chunk, right_chunk=None if right is None else right[:, :, t:t + step]))
+            t += step
+            first = False
+        enc = torch.cat(outs, dim=2)
+        mu, _ = torch.chunk(enc, 2, dim=1)  # (1, C, F, H, W)
 
-    mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(mu)
-    std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(mu)
-    mu_norm = (mu.float() - mean) * (1.0 / std)
+        mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(mu)
+        std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(mu)
+        mu_norm = (mu.float() - mean) * (1.0 / std)
 
     _, c, f, h, w = mu_norm.shape
     flat = mu_norm[0].permute(1, 2, 3, 0).reshape(f * h * w, c).to(torch.bfloat16).cpu()
@@ -172,7 +176,8 @@ def main():
     ap.add_argument("--target-fps", type=float, default=12.5, help="Exact sampling fps for latents.")
     ap.add_argument("--image-size", type=int, default=256, help="VAE input resolution (square).")
     ap.add_argument("--device", default="cuda", help="Torch device.")
-    ap.add_argument("--stereotok-checkpoint", help="Frozen u8000 student export; requires real right cameras.")
+    ap.add_argument("--stereotok-checkpoint", help="Selected frozen u15853 student export.")
+    ap.add_argument("--stereotok-input-mode", choices=("stereo", "mono-left"), default="stereo")
     ap.add_argument("--right-camera-map", help="JSON mapping each configured left camera to its true right eye.")
     args = ap.parse_args()
 
@@ -186,7 +191,9 @@ def main():
 
     info = json.loads((src / "meta" / "info.json").read_text())
     right_camera_map = json.loads(Path(args.right_camera_map).read_text()) if args.right_camera_map else None
-    if bool(args.stereotok_checkpoint) != bool(right_camera_map):
+    if args.stereotok_input_mode == 'mono-left' and (not args.stereotok_checkpoint or right_camera_map is not None):
+        raise ValueError('Mono-left requires a StereoTok checkpoint and no right-camera map')
+    if args.stereotok_input_mode == 'stereo' and bool(args.stereotok_checkpoint) != bool(right_camera_map):
         raise ValueError('StereoTok checkpoint and admitted right-camera map must be supplied together')
     if right_camera_map is not None:
         if set(right_camera_map) != set(LATENT_CAM_KEYS) or len(set(right_camera_map.values())) != len(LATENT_CAM_KEYS):
@@ -221,7 +228,8 @@ def main():
     (out / "meta").mkdir(parents=True, exist_ok=True)
 
     print("[process_data] loading Wan2.2 VAE + text encoder ...", flush=True)
-    vae = load_vae(str(base / "vae"), dtype, device, stereotok_checkpoint=args.stereotok_checkpoint)
+    vae = load_vae(str(base / "vae"), dtype, device, stereotok_checkpoint=args.stereotok_checkpoint,
+                   stereotok_input_mode=args.stereotok_input_mode)
     wrapper = WanVAEStreamingWrapper(vae)
     tokenizer = load_tokenizer(str(base / "tokenizer"))
     text_encoder = load_text_encoder(str(base / "text_encoder"), dtype, device)
@@ -328,6 +336,8 @@ def main():
         feat["names"] = list(ACTION_NAMES_30)
         out_info["features"][key] = feat
     out_info["total_episodes"] = len(new_episodes)
+    if args.stereotok_input_mode == 'mono-left':
+        out_info["vae_binding"] = dict(vae.binding)
     out_info["total_frames"] = total_frames
     out_info["total_chunks"] = (len(new_episodes) - 1) // chunks_size + 1
     out_info["total_videos"] = len(new_episodes) * sum(

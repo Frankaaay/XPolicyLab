@@ -15,3 +15,4 @@ va_shared_cfg.patch_size = (1, 2, 2)
 
 va_shared_cfg.enable_offload = False
 va_shared_cfg.stereotok_checkpoint = os.environ.get('LINGBOT_STEREOTOK_CHECKPOINT')
+va_shared_cfg.stereotok_input_mode = os.environ.get('LINGBOT_STEREOTOK_INPUT_MODE', 'stereo')
