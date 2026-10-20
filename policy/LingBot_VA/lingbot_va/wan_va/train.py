@@ -427,9 +427,33 @@ class Trainer:
             raise RuntimeError('Resume config, world size or data contract changed')
         set_model_state_dict(self.transformer, state['model_state_dict'],
                              options=StateDictOptions(full_state_dict=True, strict=True))
-        set_optimizer_state_dict(self.transformer, self.optimizer,
-                                 optim_state_dict=state['optimizer_state_dict'],
-                                 options=StateDictOptions(full_state_dict=True, strict=True))
+        optimizer_state = state['optimizer_state_dict']
+        parameter_names = {
+            param: name.replace('_checkpoint_wrapped_module.', '').replace('_orig_mod.', '')
+            for name, param in self.transformer.named_parameters()
+        }
+        if len(self.optimizer.param_groups) != len(optimizer_state['param_groups']):
+            raise RuntimeError('Resume optimizer parameter groups changed')
+        lazy_parameters = []
+        for current, saved in zip(self.optimizer.param_groups, optimizer_state['param_groups']):
+            if [parameter_names[p] for p in current['params']] != saved['params']:
+                raise RuntimeError('Resume optimizer parameter names or order changed')
+            for param in current['params']:
+                if parameter_names[param] not in optimizer_state['state'] and param.requires_grad:
+                    lazy_parameters.append(param)
+        # AdamW legitimately has no state for parameters that never received a
+        # gradient. Torch 2.9's DCP loader otherwise indexes these missing keys
+        # and initializes artificial moments. Exclude them only while loading.
+        try:
+            for param in lazy_parameters:
+                param.requires_grad_(False)
+                self.optimizer.state.pop(param, None)
+            set_optimizer_state_dict(self.transformer, self.optimizer,
+                                     optim_state_dict=optimizer_state,
+                                     options=StateDictOptions(full_state_dict=True, strict=True))
+        finally:
+            for param in lazy_parameters:
+                param.requires_grad_(True)
         self.lr_scheduler.load_state_dict(state['scheduler'])
         self.step = state['step']
         local = state['ranks'][self.config.rank]

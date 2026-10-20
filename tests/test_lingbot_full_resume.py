@@ -19,6 +19,17 @@ class Samples(Dataset):
     def __getitem__(self, index):
         return torch.tensor([index / 17, random.random(), float(np.random.rand()), float(torch.rand(()))])
 
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.main = torch.nn.Sequential(torch.nn.Linear(4, 16), torch.nn.Dropout(.2), torch.nn.Linear(16, 1))
+        self.later = torch.nn.Linear(4, 1)
+        self.unused = torch.nn.Linear(4, 1)
+
+    def forward(self, x, activate_later):
+        y = self.main(x)
+        return y + self.later(x) if activate_later else y
+
 def main():
     source = Path(__file__).resolve().parents[1] / 'policy/LingBot_VA/lingbot_va/wan_va/train.py'
     tree = ast.parse(source.read_text())
@@ -36,7 +47,7 @@ def main():
         t = Trainer()
         t.config = SimpleNamespace(world_size=world, rank=rank, local_rank=local, batch_size=2, load_worker=2)
         t.device = torch.device(f'cuda:{local}'); t.step = 0
-        t.transformer = torch.nn.Sequential(torch.nn.Linear(4, 16), torch.nn.Dropout(.2), torch.nn.Linear(16, 1)).cuda()
+        t.transformer = Model().cuda()
         t.transformer.config = {}
         fully_shard(t.transformer, mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32))
         t.optimizer = torch.optim.AdamW(t.transformer.parameters(), lr=.001, fused=True)
@@ -51,7 +62,7 @@ def main():
         batches=[]; losses=[]
         for _ in range(2):
             x=t._get_next_batch().cuda(); batches.append(x.cpu())
-            loss=(t.transformer(x).float()-torch.randn(x.shape[0],1,device='cuda')).square().mean()/2
+            loss=(t.transformer(x, t.step >= 3).float()-torch.randn(x.shape[0],1,device='cuda')).square().mean()/2
             loss.backward(); losses.append(loss.detach().cpu())
         t.optimizer.step(); t.lr_scheduler.step(); t.optimizer.zero_grad(); t.step+=1
         return batches, losses
@@ -68,6 +79,8 @@ def main():
     from torch.distributed.checkpoint.state_dict import set_model_state_dict
     set_model_state_dict(b.transformer,load_file(out/'checkpoint_step_2/transformer/diffusion_pytorch_model.safetensors'),options=opts)
     b._load_training_state(out/'checkpoint_step_2')
+    assert all(p.requires_grad for p in b.transformer.parameters())
+    assert all(p not in b.optimizer.state for n,p in b.transformer.named_parameters() if n.startswith(('later.', 'unused.')))
     actual=[update(b) for _ in range(4)]
     def equal(x,y):
         if isinstance(x,torch.Tensor): assert torch.equal(x,y), (x,y)
@@ -82,8 +95,8 @@ def main():
     equal(optimizer,get_optimizer_state_dict(b.transformer,b.optimizer,options=opts)); equal(scheduler,b.lr_scheduler.state_dict())
     assert b.step==a.step==6 and b.data_epoch==a.data_epoch
     b.save_checkpoint()
-    assert not (out/'checkpoint_step_2/training_state.pt').exists()
-    assert not (out/'checkpoint_step_2/complete.json').exists()
+    assert (out/'checkpoint_step_2/training_state.pt').is_file()
+    assert (out/'checkpoint_step_2/complete.json').is_file()
     assert (out/'checkpoint_step_6/complete.json').is_file()
     assert all(t.dtype == torch.bfloat16 for t in load_file(out/'checkpoint_step_2/transformer/diffusion_pytorch_model.safetensors').values())
     c=make(); c._load_training_state(out/'checkpoint_step_6')
