@@ -44,6 +44,14 @@ class TailContractTest(unittest.TestCase):
                                  wrapper.encode_chunk(pixels[:, :, 1:5]),
                                  wrapper.encode_chunk(pixels[:, :, 5:9])], dim=2)
             torch.testing.assert_close(encoded, torch.cat((mean, logvar), dim=1))
+        wrapper.clear_cache()
+        grouped = torch.cat([wrapper.encode_chunk(pixels[:, :, :1]),
+                             wrapper.encode_chunk(pixels[:, :, 1:])], dim=2)
+        torch.testing.assert_close(grouped, encoded, rtol=0, atol=0)
+        wrapper.clear_cache()
+        torch.testing.assert_close(wrapper.encode_chunk(pixels), encoded, rtol=0, atol=0)
+        with self.assertRaisesRegex(ValueError, 'four-frame'):
+            wrapper.encode_chunk(pixels[:, :, :5])
         with self.assertRaisesRegex(ValueError, 'right eyes'):
             wrapper.encode_chunk(pixels[:, :, 1:5], pixels[:, :, 1:5])
         with self.assertRaisesRegex(ValueError, 'Reset'):

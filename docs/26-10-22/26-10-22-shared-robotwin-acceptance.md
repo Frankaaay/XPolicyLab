@@ -5,3 +5,11 @@
 v6 dlcem1rm391wybl6：FastWAM Wan和OpenWAM StereoTok均完成Clean/Randomized两次策略调用，初始七路RGB/场景/seed/instruction完全等于初始化基准，有限16D EEF动作已实际执行。LingBot StereoTok已成功生成第一动作块并执行，错误发生于首块后的_compute_kv_cache反馈（并非模型未能加载或首个动作生成失败）。FP32编码/归一化结果直接进入BF16 patch_embedding_mlp，报mat1 Float / mat2 BFloat16；action随后也跟随latent的dtype。
 
 定向修复：仅在KV反馈进入DiT之前，将latent_model_input转为self.device/self.dtype，action沿既有to(latent)路径同步。保留VAE/归一化FP32、原生BF16 DiT和推理步数/guidance/数据/权重，不增加autocast或修改全模型精度。与_infer原有BF16噪声及conditioning边界一致。增加first-frame与后续chunk测试，核验cast数值、action dtype、原编码dtype未改以及帧计数。AST解析通过；实际Torch测试和真实LingBot联调待运行。
+
+## v7回归结果与checkpoint可用性
+
+v7 dlc1adiuq3axs753的6项LingBot测试全部通过，新增KV边界测试覆盖初始帧与后续chunk。随后复用旧checkpoint时complete.json不存在，按检查停止，未退回不完整权重。v8 dlcicp9mz7mmz7e5改为启动时重新挑选当前完整checkpoint并记录实际step/complete marker，保留其余推理设置和修复SHA；仅用于代表性接口验收。没有宣称v7复现使用了同一权重，没有将新旧权重结果混成分数。先前已通过Fast/Open结果保留。v8请求和脚本前缀shared-runtime-lingbot-v8。
+
+## v8连续反馈定位与修复
+
+v8 dlcicp9mz7mmz7e5使用完整step31000，KV dtype修复已通过首轮反馈；后续原生反馈为8帧，StereoTok wrapper只接受4帧而退出。仅在流式编码器内按完整4帧组顺序编码并拼接latent，保留全部帧、因果缓存和原生动作节奏；首组仍为1帧。增加整9帧及1+8分组与既有1+4+4逐元素完全一致测试，非法尾组拒绝。AST通过，实际Torch回归及连续真实推理由v9执行。

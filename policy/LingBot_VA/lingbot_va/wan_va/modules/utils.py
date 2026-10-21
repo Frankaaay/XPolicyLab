@@ -108,6 +108,27 @@ class WanVAEStreamingWrapper:
 
     @torch.no_grad()
     def encode_chunk(self, x_chunk, right_chunk=None):
+        if self.stereotok and x_chunk.ndim == 5:
+            expected = 1 if self.first_chunk else 4
+            frames = x_chunk.shape[2]
+            if frames > expected:
+                if (frames - expected) % 4:
+                    raise ValueError('StereoTok stream requires complete four-frame groups')
+                if self.stereo and (right_chunk is None or right_chunk.shape != x_chunk.shape):
+                    raise ValueError('StereoTok streaming requires matching real [B,3,T,H,W] eyes')
+                if not self.stereo and right_chunk is not None:
+                    raise ValueError('Mono-left StereoTok must not receive right eyes')
+                for pixels in (x_chunk, right_chunk):
+                    if pixels is not None and (not torch.isfinite(pixels).all() or pixels.abs().max() > 1.001):
+                        raise ValueError('StereoTok inputs must be finite and normalized to [-1,1]')
+                chunks = []
+                start = 0
+                while start < frames:
+                    end = start + (1 if self.first_chunk else 4)
+                    chunks.append(self.encode_chunk(x_chunk[:, :, start:end],
+                        None if right_chunk is None else right_chunk[:, :, start:end]))
+                    start = end
+                return torch.cat(chunks, dim=2)
         if self.stereotok and not self.stereo:
             if right_chunk is not None:
                 raise ValueError('Mono-left StereoTok must not receive right eyes')
