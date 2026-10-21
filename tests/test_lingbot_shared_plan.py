@@ -96,5 +96,39 @@ class LingBotSharedPlanTests(unittest.TestCase):
         with patch.object(model.client, 'infer', return_value={'action': np.zeros((16, 2, 0))}):
             with self.assertRaises(ValueError): model.step(env, env.get_obs())
 
+    def test_cache_feedback_casts_normalized_latents_at_transformer_boundary(self):
+        import ast
+        import torch
+        source = ROOT / 'policy/LingBot_VA/lingbot_va/wan_va/wan_va_server.py'
+        tree = ast.parse(source.read_text())
+        server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'VA_Server')
+        method = next(node for node in server.body if isinstance(node, ast.FunctionDef) and node.name == '_compute_kv_cache')
+        namespace = dict(torch=torch, os=__import__('os'), save_async=lambda *args: None,
+                         logger=types.SimpleNamespace(info=lambda *args: None))
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+        for start in (0, 2):
+            with self.subTest(frame_st_id=start):
+                encoded = torch.randn(1, 48, 1, 4, 4, dtype=torch.float32)
+                initial = torch.randn_like(encoded)
+                actions = torch.randn(1, 30, 2, 16, 1)
+                calls = []
+                class Transformer:
+                    def clear_pred_cache(self, name): pass
+                    def __call__(self, value, **kwargs): calls.append(value)
+                instance = types.SimpleNamespace(
+                    transformer=Transformer(), cache_name='pos', exp_save_root='/unused',
+                    frame_st_id=start, init_latent=initial, device=torch.device('cpu'), dtype=torch.bfloat16,
+                    _encode_obs=lambda obs: encoded, preprocess_action=lambda state: actions,
+                    _prepare_latent_input=lambda latent, action, **kw: dict(latent_res_lst=latent, action_res_lst=action),
+                    _repeat_input_for_cfg=lambda value: value)
+                with patch.object(torch.cuda, 'empty_cache'):
+                    namespace['_compute_kv_cache'](instance, dict(obs=[], state=None))
+                expected = torch.cat([initial, encoded], dim=2) if start == 0 else encoded
+                self.assertEqual([value.dtype for value in calls], [torch.bfloat16, torch.bfloat16])
+                self.assertTrue(torch.equal(calls[0], expected.to(torch.bfloat16)))
+                self.assertTrue(torch.equal(calls[1], actions.to(torch.bfloat16)))
+                self.assertEqual(encoded.dtype, torch.float32)
+                self.assertEqual(instance.frame_st_id, start + expected.shape[2])
+
 
 if __name__ == '__main__': unittest.main()

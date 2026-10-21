@@ -594,6 +594,9 @@ class VA_Server:
                 [self.init_latent, latent_model_input],
                 dim=2) if latent_model_input is not None else self.init_latent
 
+        # Keep VAE encoding/normalization precision, then match the DiT input
+        # contract used by _infer's BF16 latents and conditioning tensors.
+        latent_model_input = latent_model_input.to(device=self.device, dtype=self.dtype)
         action_model_input = self.preprocess_action(obs['state'])
         action_model_input = action_model_input.to(latent_model_input)
         logger.info(
