@@ -3,7 +3,7 @@ from wan_va.utils.Simple_Remote_Infer.deploy.websocket_client_policy import Webs
 import argparse
 from libero.libero import benchmark
 import time
-from libero.libero.envs import OffScreenRenderEnv
+from XPolicyLab.utils.render_libero_stereo import FreshStereoEvalEnv
 from pathlib import Path
 from tqdm import tqdm
 from lerobot.datasets.utils import write_json
@@ -38,7 +38,7 @@ def construct_single_env(env_args):
     env_creation = False
     while not env_creation and count < 5:
         try:
-            env = OffScreenRenderEnv(**env_args)
+            env = FreshStereoEvalEnv(**env_args)
             env_creation = True
         except Exception as e:
             print(f"Error!!!  construct env failed: {e}")
@@ -56,9 +56,16 @@ def _extract_obs(obs):
     Avoids torch round-trip: the env already returns uint8 numpy arrays [H, W, C].
     We just flip the vertical axis ([::-1]) and make a contiguous copy once.
     """
-    agentview = np.ascontiguousarray(obs["agentview_image"][::-1])
-    eye_in_hand = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1])
-    return {"observation.images.agentview_rgb": agentview, "observation.images.eye_in_hand_rgb": eye_in_hand}
+    result = {}
+    for source, target in [('agentview', 'agentview_rgb'), ('robot0_eye_in_hand', 'eye_in_hand_rgb')]:
+        image = obs[source + '_image']
+        result['observation.images.' + target] = np.ascontiguousarray(image if obs.get('fresh_rgb') else image[::-1])
+        right = source + '_stereo_right_image'
+        if right in obs:
+            if obs[right].shape != image.shape:
+                raise ValueError('Stereo observation shape mismatch')
+            result['observation.images.' + target + '_right'] = np.ascontiguousarray(obs[right])
+    return result
 
 
 def init_single_env(env_in, init_state):
@@ -74,7 +81,7 @@ def env_one_step(env_in, action):
     return _extract_obs(obs), done
 
 
-def run_one(model, libero_benchmark, task_idx, out_dir, episode_idx):
+def run_one(model, libero_benchmark, task_idx, out_dir, episode_idx, stereo=False):
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[libero_benchmark]()
     num_tasks = benchmark_instance.get_num_tasks()
@@ -84,6 +91,7 @@ def run_one(model, libero_benchmark, task_idx, out_dir, episode_idx):
                 "bddl_file_name": benchmark_instance.get_task_bddl_file_path(task_idx),
                 "camera_heights": 128,
                 "camera_widths": 128,
+                "stereo": stereo,
             }
     init_states = benchmark_instance.get_task_init_states(task_idx)
 
@@ -137,7 +145,7 @@ def run_one(model, libero_benchmark, task_idx, out_dir, episode_idx):
     return done
 
 
-def run(libero_benchmark, port, out_dir, test_num, task_range=None):
+def run(libero_benchmark, port, out_dir, test_num, task_range=None, stereo=False):
     '''
         task_range: [start, end) for splitting tasks
     '''
@@ -167,7 +175,7 @@ def run(libero_benchmark, port, out_dir, test_num, task_range=None):
             succ_num = 0.
 
         for episode_idx in tqdm(episode_list, total=len(episode_list)):
-            res_i = run_one(model, libero_benchmark, task_idx, out_dir, episode_idx)
+            res_i = run_one(model, libero_benchmark, task_idx, out_dir, episode_idx, stereo=stereo)
             succ_num += res_i
             succ_rate = succ_num / (episode_idx + 1)
             print(f"Success rate: {succ_rate}, success num: {succ_num}, total num: {episode_idx + 1}")
@@ -183,6 +191,7 @@ def run(libero_benchmark, port, out_dir, test_num, task_range=None):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--stereo', action='store_true')
     parser.add_argument(
         "--libero-benchmark",
         type=str,

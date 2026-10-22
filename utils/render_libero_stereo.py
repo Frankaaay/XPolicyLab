@@ -42,6 +42,68 @@ def prepare_xml(xml, assets, robosuite):
     return ET.tostring(root, encoding='unicode')
 
 
+class FreshStereoEvalEnv:
+    """Render evaluation observations with the admitted training camera recipe.
+
+    Both VAE variants use the same fresh left images; only StereoTok receives
+    the additional right images. Rendering never advances simulation time.
+    """
+    def __init__(self, *, stereo=False, **kwargs):
+        from libero.libero.envs import OffScreenRenderEnv
+        self._wrapped = OffScreenRenderEnv(**kwargs)
+        self.stereo = stereo
+        self.height = kwargs['camera_heights']
+        self.width = kwargs['camera_widths']
+        self.renderer = None
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def reset(self):
+        from libero.libero import get_libero_path
+        import robosuite
+        if self.renderer is not None:
+            self.renderer.close()
+            self.renderer = None
+        obs = self._wrapped.reset()
+        env = self._wrapped.env
+        state = env.sim.get_state()
+        xml = prepare_xml(env.sim.model.get_xml(), Path(get_libero_path('assets')),
+                          Path(robosuite.__file__).parent)
+        env.reset_from_xml_string(xml)
+        env.sim.set_state(state)
+        env.sim.forward()
+        self.renderer = mujoco.Renderer(env.sim.model._model, height=self.height, width=self.width)
+        return self._images(obs)
+
+    def _images(self, obs):
+        env = self._wrapped.env
+        mujoco.mj_forward(env.sim.model._model, env.sim.data._data)
+        env._post_process()
+        obs = dict(obs)
+        obs.update(env._get_observations(force_update=True))
+        for camera in ('agentview', 'robot0_eye_in_hand'):
+            for suffix in ('', '_stereo_right') if self.stereo else ('',):
+                self.renderer.update_scene(env.sim.data._data, camera=camera + suffix,
+                    scene_option=env.sim._render_context_offscreen.vopt)
+                obs[camera + suffix + '_image'] = self.renderer.render().copy()
+        obs['fresh_rgb'] = True
+        return obs
+
+    def set_init_state(self, state):
+        return self._images(self._wrapped.set_init_state(state))
+
+    def step(self, action):
+        obs, reward, done, info = self._wrapped.step(action)
+        return self._images(obs), reward, done, info
+
+    def close(self):
+        if self.renderer is not None:
+            self.renderer.close()
+            self.renderer = None
+        self._wrapped.close()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for key in ['source', 'output', 'libero-assets', 'robosuite-root']:
