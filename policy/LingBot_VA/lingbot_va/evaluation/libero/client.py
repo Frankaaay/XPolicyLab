@@ -1,10 +1,13 @@
 import numpy as np
-from wan_va.utils.Simple_Remote_Infer.deploy.websocket_client_policy import WebsocketClientPolicy
+import sys
+from pathlib import Path
+# The simulation client needs only the transport, not wan_va's model imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'wan_va/utils/Simple_Remote_Infer'))
+from deploy.websocket_client_policy import WebsocketClientPolicy
 import argparse
 from libero.libero import benchmark
 import time
 from XPolicyLab.utils.render_libero_stereo import FreshStereoEvalEnv
-from pathlib import Path
 from tqdm import tqdm
 import json
 import os
