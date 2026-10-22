@@ -6,7 +6,7 @@ import time
 from XPolicyLab.utils.render_libero_stereo import FreshStereoEvalEnv
 from pathlib import Path
 from tqdm import tqdm
-from lerobot.datasets.utils import write_json
+import json
 import os
 import imageio
 import cv2
@@ -181,12 +181,11 @@ def run(libero_benchmark, port, out_dir, test_num, task_range=None, stereo=False
             print(f"Success rate: {succ_rate}, success num: {succ_num}, total num: {episode_idx + 1}")
             out_file = Path(out_dir) / f"{libero_benchmark}_{task_idx}.json"
             out_file.parent.mkdir(exist_ok=True, parents=True)
-            write_json({
+            out_file.write_text(json.dumps({
                 "succ_num": succ_num,
                 "total_num": episode_idx + 1.,
                 "succ_rate": succ_rate,
-                }, out_file
-            )
+                }))
 
 
 def main():
