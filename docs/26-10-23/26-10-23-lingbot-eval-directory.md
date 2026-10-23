@@ -1,0 +1,5 @@
+# LingBot评测输出目录修复
+
+RoboTwin Clean scan_object长指令被直接拼入目录名，触发Errno36并终止worker。仅将输出目录中的prompt替换为SHA256前16位；模型encode_prompt仍收到完整原指令，推理配置、RNG、KV与动作不变。原输出与已完成回合保留。
+
+验证：执行生产代码AST中的实际命名语句，覆盖长ASCII、Unicode、斜杠和None；目录组件小于255字节且无路径分隔符，prompt输入不变。后续H800双路Clean继续GPU验收。
