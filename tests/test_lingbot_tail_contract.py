@@ -1,5 +1,9 @@
 """CPU-only checks of production sampling and action tail alignment."""
 import ast
+import hashlib
+import json
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -20,6 +24,31 @@ def production_function(path, name, namespace):
 
 
 class TailContractTest(unittest.TestCase):
+    def test_cache_resume_requires_intact_outputs_and_same_inputs(self):
+        scope = dict(Path=Path, hashlib=hashlib, json=json, os=os)
+        for name in ['file_sha256', 'atomic_json', 'validate_episode_receipt']:
+            production_function(ROOT / 'process_data.py', name, scope)
+        out = Path(tempfile.mkdtemp(prefix='lingbot-resume-test-'))
+        marker = out / 'episode.json'
+        inputs = {'source.mp4': [123, 456]}
+        validate = scope['validate_episode_receipt']
+        self.assertIsNone(validate(out, marker, inputs))
+        artifact = out / 'latent.pth'
+        artifact.write_bytes(b'complete latent')
+        receipt = dict(inputs=inputs, outputs={'latent.pth': scope['file_sha256'](artifact)})
+        scope['atomic_json'](marker, receipt)
+        self.assertEqual(validate(out, marker, inputs), receipt)
+        with self.assertRaisesRegex(RuntimeError, 'Source episode changed'):
+            validate(out, marker, {'source.mp4': [124, 456]})
+        artifact.write_bytes(b'interrupted/corrupt latent')
+        with self.assertRaisesRegex(RuntimeError, 'missing or corrupt'):
+            validate(out, marker, inputs)
+        artifact.unlink()
+        with self.assertRaisesRegex(RuntimeError, 'missing or corrupt'):
+            validate(out, marker, inputs)
+        marker.unlink()
+        out.rmdir()
+
     def test_mono_stream_matches_native_posterior_and_resets(self):
         from fastwam.models.wan22.stereotok.vae2_2 import WanVAE_
         model = WanVAE_(dim=8, dec_dim=8, z_dim=48, dim_mult=[1, 2, 4, 4],

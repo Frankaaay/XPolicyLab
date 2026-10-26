@@ -13,6 +13,9 @@ LingBot-VA training dataset by running every step of the upstream pipeline
 The output is a self-contained LeRobot v2.1 dataset the trainer can load directly.
 """
 import argparse
+import hashlib
+import time
+import fcntl
 import json
 import os
 import sys
@@ -104,6 +107,8 @@ def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, siz
         right = F.interpolate(right, size=image_size, mode='bilinear', align_corners=False)
         right = (right / 255.0 * 2.0 - 1.0).unsqueeze(0).to(device).to(dtype)
 
+    torch.cuda.synchronize(device)
+    vae_started = time.perf_counter()
     if getattr(vae, 'binding', {}).get('input_mode') == 'mono-left':
         # Use the same default optimized posterior as policy training; no right eye.
         mu_norm = vae.encode(x, device, right_videos=right)
@@ -125,9 +130,11 @@ def encode_video_latent(frames_rgb: np.ndarray, vae, wrapper, device, dtype, siz
         std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(mu)
         mu_norm = (mu.float() - mean) * (1.0 / std)
 
+    torch.cuda.synchronize(device)
+    vae_seconds = time.perf_counter() - vae_started
     _, c, f, h, w = mu_norm.shape
     flat = mu_norm[0].permute(1, 2, 3, 0).reshape(f * h * w, c).to(torch.bfloat16).cpu()
-    return flat, f, h, w
+    return flat, f, h, w, vae_seconds
 
 
 @torch.no_grad()
@@ -166,6 +173,35 @@ def source_video_path(src: Path, info: dict, cam: str, ep_idx: int, ep_chunk: in
     return src / rel
 
 
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(json.dumps(value, sort_keys=True))
+    os.replace(temporary, path)
+
+
+def validate_episode_receipt(out, marker, inputs):
+    if not marker.is_file():
+        return None
+    receipt = json.loads(marker.read_text())
+    if receipt['inputs'] != inputs:
+        raise RuntimeError('Source episode changed since encoding: ' + str(marker))
+    for relative, digest in receipt['outputs'].items():
+        path = out / relative
+        if not path.is_file() or file_sha256(path) != digest:
+            raise RuntimeError('Completed cache artifact is missing or corrupt: ' + str(path))
+    return receipt
+
+
 def main():
     ap = argparse.ArgumentParser(description="LingBot_VA data processing (latent extraction).")
     ap.add_argument("--source-dataset", required=True, help="Source LeRobot v2.1 dataset dir.")
@@ -179,11 +215,12 @@ def main():
     ap.add_argument("--stereotok-checkpoint", help="Selected frozen u15853 student export.")
     ap.add_argument("--stereotok-input-mode", choices=("stereo", "mono-left"), default="stereo")
     ap.add_argument("--right-camera-map", help="JSON mapping each configured left camera to its true right eye.")
+    ap.add_argument("--resume", action="store_true", help="Resume only provenance-matched, checksum-verified episodes.")
     args = ap.parse_args()
 
     src = Path(args.source_dataset).resolve()
     out = Path(args.output_dataset).resolve()
-    if out == src or (out.exists() and any(out.iterdir())):
+    if out == src or (out.exists() and any(out.iterdir()) and not args.resume):
         raise FileExistsError('Use a new empty output directory; source and existing outputs are preserved')
     base = Path(args.base_model).resolve()
     device = args.device
@@ -220,6 +257,32 @@ def main():
     if args.num_episodes > 0:
         episodes = episodes[:args.num_episodes]
 
+    contract = dict(source=str(src), base=str(base), target_fps=args.target_fps,
+                    image_size=args.image_size, episode_start=args.episode_start,
+                    episode_ids=[e['episode_index'] for e in episodes],
+                    stereotok_checkpoint=args.stereotok_checkpoint,
+                    input_mode=args.stereotok_input_mode, right_camera_map=right_camera_map,
+                    converter_sha256=file_sha256(__file__),
+                    metadata={name: file_sha256(src / 'meta' / name) for name in
+                              ['info.json', 'episodes.jsonl', 'episodes_stats.jsonl', 'tasks.jsonl']})
+    weights = [p for directory in ['vae', 'tokenizer', 'text_encoder']
+               for p in sorted((base / directory).iterdir()) if p.is_file()]
+    if args.stereotok_checkpoint:
+        weights.append(Path(args.stereotok_checkpoint).resolve())
+    contract['weights'] = {str(p): [p.stat().st_size, p.stat().st_mtime_ns] for p in weights}
+    out.mkdir(parents=True, exist_ok=True)
+    lock = (out / 'conversion.lock').open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    contract_path = out / 'conversion-contract.json'
+    if contract_path.exists():
+        if not args.resume or json.loads(contract_path.read_text()) != contract:
+            raise RuntimeError('Cache conversion contract changed; refusing mixed cache')
+    elif any(p.name != 'conversion.lock' for p in out.iterdir()):
+        raise RuntimeError('Existing output has no conversion contract')
+    else:
+        atomic_json(contract_path, contract)
+    (out / 'completed').mkdir(exist_ok=True)
+
     print(f"[process_data] source={src}", flush=True)
     print(f"[process_data] output={out}", flush=True)
     print(f"[process_data] episodes={len(episodes)} ori_fps={ori_fps} stride={stride} "
@@ -238,6 +301,7 @@ def main():
     total_frames = 0
 
     for ep in episodes:
+        episode_started = time.perf_counter()
         ep_idx = ep["episode_index"]
         ep_chunk = ep_idx // chunks_size
         length = ep["length"]
@@ -246,6 +310,14 @@ def main():
 
         # --- Step 1: rewrite parquet action/state to 30-dim -------------------
         src_pq = src / "data" / chunk_dir / f"episode_{ep_idx:06d}.parquet"
+        input_paths = [src_pq] + [source_video_path(src, info, cam, ep_idx, ep_chunk)
+                                  for cam in LATENT_CAM_KEYS]
+        if right_camera_map:
+            input_paths += [source_video_path(src, info, cam, ep_idx, ep_chunk)
+                            for cam in right_camera_map.values()]
+        inputs = {str(p): [p.stat().st_size, p.stat().st_mtime_ns] for p in input_paths}
+        marker = out / 'completed' / f'episode_{ep_idx:06d}.json'
+        completed = validate_episode_receipt(out, marker, inputs)
         df = pd.read_parquet(src_pq)
         act14 = np.stack(df["action"].to_numpy()).astype(np.float32)
         st14 = np.stack(df["observation.state"].to_numpy()).astype(np.float32)
@@ -255,7 +327,10 @@ def main():
         df["observation.state"] = list(st30)
         out_pq = out / "data" / chunk_dir / f"episode_{ep_idx:06d}.parquet"
         out_pq.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(out_pq, index=False)
+        if completed is None:
+            temporary = out_pq.with_suffix('.parquet.tmp')
+            df.to_parquet(temporary, index=False)
+            os.replace(temporary, out_pq)
         total_frames += len(df)
 
         # --- Step 2: action_config (single segment per episode) ---------------
@@ -273,6 +348,12 @@ def main():
         new_ep_stats.append({"episode_index": ep_idx, "stats": stats})
 
         # --- Step 3: text embedding + video latents per camera ----------------
+        if completed is not None:
+            print('CACHE_REUSED', ep_idx, flush=True)
+            continue
+        output_files = [out_pq]
+        vae_total_seconds = 0.0
+        encoded_frames = 0
         text_emb = encode_text(task, tokenizer, text_encoder)
         for cam in LATENT_CAM_KEYS:
             mp4 = source_video_path(src, info, cam, ep_idx, ep_chunk)
@@ -290,9 +371,13 @@ def main():
                 if len(right_frames) != length:
                     raise ValueError(f'Episode {ep_idx}: right-eye length mismatch')
                 right_clip = right_frames[np.minimum(frame_ids, length - 1)]
-            latent, f_lat, h_lat, w_lat = encode_video_latent(
+            latent, f_lat, h_lat, w_lat, vae_seconds = encode_video_latent(
                 clip, vae, wrapper, device, dtype, args.image_size, right_rgb=right_clip)
 
+            vae_total_seconds += vae_seconds
+            encoded_frames += len(frame_ids)
+            if not torch.isfinite(latent).all():
+                raise RuntimeError(f"Non-finite latent at episode {ep_idx}, camera {cam}")
             rec = {
                 "latent": latent,
                 "latent_num_frames": f_lat,
@@ -312,13 +397,27 @@ def main():
             }
             lat_dir = out / "latents" / chunk_dir / cam
             lat_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(rec, lat_dir / f"episode_{ep_idx:06d}_0_{length}.pth")
+            final = lat_dir / f"episode_{ep_idx:06d}_0_{length}.pth"
+            temporary = final.with_suffix('.pth.tmp')
+            torch.save(rec, temporary)
+            os.replace(temporary, final)
+            output_files.append(final)
+
+        receipt = dict(episode_index=ep_idx, source_frames=length,
+                       encoded_camera_frames=encoded_frames, vae_seconds=vae_total_seconds,
+                       inputs=inputs,
+                       outputs={str(p.relative_to(out)): file_sha256(p) for p in output_files})
+        receipt['episode_seconds'] = time.perf_counter() - episode_started
+        atomic_json(marker, receipt)
+        print('CACHE_TIMING ' + json.dumps({k: v for k, v in receipt.items()
+                                           if k not in ('inputs', 'outputs')}), flush=True)
 
         print(f"[process_data]   episode {ep_idx}: length={length} "
               f"latent_frames={f_lat} cams={len(LATENT_CAM_KEYS)}", flush=True)
 
     # --- Step 4: empty_emb.pt -------------------------------------------------
-    torch.save(encode_text("", tokenizer, text_encoder), out / "empty_emb.pt")
+    torch.save(encode_text("", tokenizer, text_encoder), out / "empty_emb.pt.tmp")
+    os.replace(out / "empty_emb.pt.tmp", out / "empty_emb.pt")
 
     # --- meta files -----------------------------------------------------------
     (out / "meta" / "episodes.jsonl").write_text(
@@ -358,8 +457,14 @@ def main():
             dst_v = out / info["video_path"].format(
                 episode_chunk=ep_chunk, video_key=cam, episode_index=ep_idx)
             dst_v.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(src_v, dst_v)
+            if dst_v.is_symlink():
+                if dst_v.resolve() != src_v.resolve():
+                    raise RuntimeError('Existing video link has a different source')
+            else:
+                os.symlink(src_v, dst_v)
 
+    atomic_json(out / 'conversion-complete.json', dict(contract_sha256=file_sha256(contract_path),
+                episodes=len(new_episodes), frames=total_frames))
     print(f"[process_data] done. dataset ready at: {out}", flush=True)
     print(f"[process_data] set LINGBOT_VA_DATASET_PATH={out}", flush=True)
 
