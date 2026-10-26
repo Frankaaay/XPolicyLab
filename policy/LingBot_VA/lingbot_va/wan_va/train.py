@@ -53,17 +53,22 @@ import gc
 class Trainer:
     def __init__(self, config):
         if config.enable_wandb and config.rank == 0:
+            Path(config.save_root).mkdir(parents=True, exist_ok=True)
             wandb.login(host=os.environ['WANDB_BASE_URL'], key=os.environ['WANDB_API_KEY'])
             self.wandb = wandb
-            self.wandb.init(
+            run = self.wandb.init(
                 entity=os.environ["WANDB_TEAM_NAME"],
                 project=os.getenv("WANDB_PROJECT", "va_robotwin"),
-                # dir=log_dir,
+                dir=config.save_root,
                 config=config,
                 mode="online",
-                name='test_lln'
-                # name=os.path.basename(os.path.normpath(job_config.job.dump_folder))
+                name=os.path.basename(os.path.normpath(config.save_root)),
             )
+            if run.settings.mode != "online":
+                raise RuntimeError('Online W&B initialization did not succeed')
+            expected_run = os.environ.get('WANDB_RUN_ID')
+            if expected_run and run.id != expected_run:
+                raise RuntimeError('W&B run identity changed')
             logger.info("WandB logging enabled")
         self.step = 0
         self.config = config

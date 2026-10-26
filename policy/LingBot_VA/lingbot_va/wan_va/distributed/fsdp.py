@@ -26,9 +26,11 @@ def shard_model(model,
     fsdp_config = {"mp_policy": mp_policy, "reshard_after_forward": True}
 
     for block in model.blocks:
-        fully_shard(block.attn1, **fsdp_config)
-        fully_shard(block.attn2, **fsdp_config)
-        fully_shard(block.ffn, **fsdp_config)
+        # Retain child parameters until backward; the parent still reshards.
+        child_config = {**fsdp_config, "reshard_after_forward": False}
+        fully_shard(block.attn1, **child_config)
+        fully_shard(block.attn2, **child_config)
+        fully_shard(block.ffn, **child_config)
         fully_shard(block, **fsdp_config)
 
     fully_shard(model, **fsdp_config)
