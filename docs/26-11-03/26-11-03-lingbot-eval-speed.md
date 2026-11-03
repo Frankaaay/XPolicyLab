@@ -25,3 +25,7 @@
 ## 第二轮候选：缓存槽位管理
 
 第一轮成对作业 dlc1w5yayz15qg4h，SHAffdd4995846e3652bf96021e6bea6b362999e69e，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/paired01，当前加载中。第二轮将WanAttention的id/mask/is_pred放CPU，K/V仍在原GPU；容量不足时显式在原K/V设备argsort，保留不稳定排序的原设备同值顺序。诊断按baseline/candidate切换原/新init_kv_cache、allocate_slots，每次reset重建缓存，确保基线不包含该优化。既有诊断中增加80次真实方法操作对照，覆盖容量不足/部分淘汰/临时回退/预测清理；CPU DSW环境测试通过，GPU同值顺序验证将在下一单卡作业启动前执行，未通过则不启动测评。静态语法/diff检查通过，真实回合和GPU验证尚待运行。
+
+## 单卡推理分片开销
+
+第一轮Clean严格对照通过，64动作/18观察/6 RPC；冷基线82.788s，热重复70.462s，候选70.542s，当前无实质端到端收益，不把冷/热差当提速。进一步定向修改_configure_model：仅eval_mode且world_size=1跳过FSDP，训练和多卡继续原分片；5项分派测试通过。第二轮诊断同时加载原FSDP和候选普通Transformer（同一GPU、相同checkpoint），逐参数验证推理BF16精度下权重一致，第二次加载前后恢复torch RNG；按变体切换模型。VAE/文本编码器共享，模型额外占用在80GiB单卡内验证。两臂KV方法独立选择，回合输入/latent/动作/RNG逐项验证，不降低精度或采样。

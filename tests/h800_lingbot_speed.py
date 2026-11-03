@@ -64,6 +64,7 @@ def server(root):
     old = load('baseline_lingbot_server', OLD/REL/'wan_va_server.py')
     from modules.model import WanAttention
     old_model = load('baseline_lingbot_model', OLD/REL/'modules/model.py')
+    old_distributed = load('baseline_lingbot_distributed', OLD/REL/'distributed/util.py')
     cache_methods = {n: getattr(WanAttention, n) for n in ['init_kv_cache', 'allocate_slots']}
     original_init = module.VA_Server.__init__
     new_methods = {n: getattr(module.VA_Server, n) for n in ['_infer', '_compute_kv_cache', '_reset', 'infer']}
@@ -87,6 +88,20 @@ def server(root):
 
     def init(self, cfg):
         original_init(self, cfg)
+        self.candidate_transformer = self.transformer
+        cpu, gpu = torch.get_rng_state(), torch.cuda.get_rng_state()
+        self.baseline_transformer = old_distributed._configure_model(
+            module.load_transformer(os.path.join(cfg.wan22_pretrained_model_name_or_path, 'transformer'),
+                                    torch_dtype=self.dtype, torch_device=self.device, attn_mode='torch'),
+            module.shard_model, self.dtype, self.device, eval_mode=True)
+        a, b = dict(self.baseline_transformer.named_parameters()), dict(self.candidate_transformer.named_parameters())
+        assert a.keys() == b.keys()
+        for name in a:
+            left = a[name].to_local() if hasattr(a[name], 'to_local') else a[name]
+            assert torch.equal(left.to(dtype=b[name].dtype), b[name]), name
+        torch.set_rng_state(cpu)
+        torch.cuda.set_rng_state(gpu)
+        put(root/'model-weight-check.json', dict(passed=True, parameters=len(a)))
         encode = self._encode_obs
 
         def encode_traced(obs):
@@ -103,6 +118,7 @@ def server(root):
         variant, key = active['variant'], active['key']
         for name, candidate_method in cache_methods.items():
             setattr(WanAttention, name, candidate_method if variant == 'candidate' else getattr(old_model.WanAttention, name))
+        self.transformer = self.candidate_transformer if variant == 'candidate' else self.baseline_transformer
         if obs.get('reset'):
             if key not in states:
                 assert variant == 'baseline'
