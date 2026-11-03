@@ -17,3 +17,7 @@
 ## 第一轮候选
 
 修正基线作业 dlc1dunp57e8qs7f，SHA7271b4f1013413cce151c91edddffef3e86ae140，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/baseline02，服务端已就绪。首轮候选仅调整 wan_va_server.py：遵守现有请求save_visualization=False，默认仍写出；移除_infer和_compute_kv_cache末尾empty_cache，保留_reset清理。AST语法及diff检查通过，实际infer方法在reset/KV/infer及默认/显式开启共5项轻量分派检查通过；尚无GPU候选验证/速度结果。不改采样/输入/RNG/模型。
+
+## baseline02 流式反馈修复
+
+第二次KV收到原客户端完整8帧时，旧StereoTok封装仅接受4帧而退出。复用已有b8164454连续多组流式反馈修复，同时用于两臂公共编码器；保留全部输入帧和原连续缓存，不计加速收益。已完成2次推理：首次9.542s，第二次7.135s；调试写出分别9.35ms/3.62ms，empty_cache约1.3ms，非主要直接开销。KV首次0.317s。继续完整回合验证；运行输出仍保留baseline02。
