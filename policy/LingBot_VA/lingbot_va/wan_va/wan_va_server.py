@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -450,7 +451,9 @@ class VA_Server:
                 dtype=self.dtype,
             )
 
-        self.exp_name = f"{prompt}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt else "default"
+        # Keep the original prompt for inference; only bound the output directory name.
+        prompt_id = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16] if prompt else None
+        self.exp_name = f"{prompt_id}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt_id else "default"
         self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
@@ -594,6 +597,9 @@ class VA_Server:
                 [self.init_latent, latent_model_input],
                 dim=2) if latent_model_input is not None else self.init_latent
 
+        # Keep VAE encoding/normalization precision, then match the DiT input
+        # contract used by _infer's BF16 latents and conditioning tensors.
+        latent_model_input = latent_model_input.to(device=self.device, dtype=self.dtype)
         action_model_input = self.preprocess_action(obs['state'])
         action_model_input = action_model_input.to(latent_model_input)
         logger.info(

@@ -14,7 +14,7 @@ import types
 B = Path('/mnt/workdir/frank')
 P = B/'projects/shared-robotwin-20261023'
 F = P/'FastWAM'
-OLD = B/'projects/lingbot-mono-eval-1a96f3d'
+OLD = P/'XPolicyLab'
 NEW = Path(__file__).resolve().parents[1]
 REL = Path('policy/LingBot_VA/lingbot_va/wan_va')
 T = B/'runs/robotwin-u15853-mono-20261101'
@@ -208,7 +208,7 @@ def run(root, baseline_only):
         (root/v).mkdir()
     gpu = subprocess.check_output(['nvidia-smi','--query-gpu=name,uuid,pci.device_id,compute_cap,memory.total','--format=csv,noheader'],text=True)
     assert len(gpu.strip().splitlines()) == 1 and '0x26BA10DE, 9.0' in gpu, gpu
-    sources = [(OLD,'1a96f3d5165c5663b9c32bfcd19cd116376f3ae2'), (F,'a8a62f82598e0cc3c47426451fd4fda690c3198a'),
+    sources = [(OLD,'815a2d3b3b0a9fa8cf2bf1475257c5c323bb94b1'), (F,'a8a62f82598e0cc3c47426451fd4fda690c3198a'),
                (P/'XPolicyLab','815a2d3b3b0a9fa8cf2bf1475257c5c323bb94b1')]
     for repo, sha in sources:
         assert subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip() == sha
