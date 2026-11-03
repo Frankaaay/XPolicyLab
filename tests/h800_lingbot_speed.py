@@ -62,6 +62,9 @@ def server(root):
     import wan_va_server as module
     from configs import VA_CONFIGS
     old = load('baseline_lingbot_server', OLD/REL/'wan_va_server.py')
+    from modules.model import WanAttention
+    old_model = load('baseline_lingbot_model', OLD/REL/'modules/model.py')
+    cache_methods = {n: getattr(WanAttention, n) for n in ['init_kv_cache', 'allocate_slots']}
     original_init = module.VA_Server.__init__
     new_methods = {n: getattr(module.VA_Server, n) for n in ['_infer', '_compute_kv_cache', '_reset', 'infer']}
     states = {}
@@ -98,6 +101,8 @@ def server(root):
     def infer(self, obs):
         active = json.loads((root/'active.json').read_text())
         variant, key = active['variant'], active['key']
+        for name, candidate_method in cache_methods.items():
+            setattr(WanAttention, name, candidate_method if variant == 'candidate' else getattr(old_model.WanAttention, name))
         if obs.get('reset'):
             if key not in states:
                 assert variant == 'baseline'
@@ -202,6 +207,44 @@ def compare(root, key, other):
     print(json.dumps(summary), flush=True)
 
 
+
+def check_cache(device):
+    """Exercise the production cache methods, including partial eviction ties."""
+    import ast
+    import torch
+    names = {'clear_pred_cache', 'clear_cache', 'init_kv_cache', 'allocate_slots',
+             '_next_cache_id', 'update_cache', 'restore_cache'}
+    objects = []
+    for repo in [OLD, NEW]:
+        tree = ast.parse((repo/REL/'modules/model.py').read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'WanAttention')
+        methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        scope = {'torch': torch}
+        exec(compile(ast.Module(body=methods, type_ignores=[]), str(repo), 'exec'), scope)
+        obj = types.SimpleNamespace(attn_caches={})
+        for name in names:
+            setattr(obj, name, types.MethodType(scope[name], obj))
+        obj.init_kv_cache('test', 37, 2, 4, device, torch.float32, 2)
+        objects.append(obj)
+    for step in range(80):
+        size = [7, 13, 4, 19, 2, 11][step % 6]
+        key = torch.arange(2*size*2*4, device=device, dtype=torch.float32).reshape(2, size, 2, 4)+step
+        value = -key
+        slots = [obj.update_cache('test', key, value, step % 3 == 0) for obj in objects]
+        assert torch.equal(slots[0].cpu(), slots[1].cpu()), ('slots', step)
+        if step % 4 == 0:
+            for obj, ids in zip(objects, slots): obj.restore_cache('test', ids)
+        if step % 7 == 0:
+            for obj in objects: obj.clear_pred_cache('test')
+        a, b = [obj.attn_caches['test'] for obj in objects]
+        for field in ['id', 'mask', 'is_pred']:
+            assert torch.equal(a[field].cpu(), b[field].cpu()), (field, step)
+        valid = a['mask'].nonzero().squeeze(-1)
+        for field in ['k', 'v']:
+            assert torch.equal(a[field][:, valid].cpu(), b[field][:, valid.cpu()].cpu()), (field, step)
+    return dict(passed=True, operations=80, device=str(device))
+
+
 def run(root, baseline_only):
     root.mkdir(parents=True, exist_ok=True)
     for v in ['baseline', 'repeat', 'candidate', 'server']:
@@ -214,6 +257,7 @@ def run(root, baseline_only):
         assert subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip() == sha
         assert not subprocess.check_output(['git','-C',str(repo),'status','--porcelain'],text=True).strip()
     assert not subprocess.check_output(['git','-C',str(NEW),'status','--porcelain'],text=True).strip()
+    put(root/'cache-check.json', check_cache('cuda'))
     assert json.loads((CK/'complete.json').read_text())['step'] == 50000
     cfg = json.loads((T/'lingbot-spec.json').read_text())['overrides']
     bundle = root/'model-bundle'

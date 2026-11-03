@@ -21,3 +21,7 @@
 ## baseline02 流式反馈修复
 
 第二次KV收到原客户端完整8帧时，旧StereoTok封装仅接受4帧而退出。复用已有b8164454连续多组流式反馈修复，同时用于两臂公共编码器；保留全部输入帧和原连续缓存，不计加速收益。已完成2次推理：首次9.542s，第二次7.135s；调试写出分别9.35ms/3.62ms，empty_cache约1.3ms，非主要直接开销。KV首次0.317s。继续完整回合验证；运行输出仍保留baseline02。
+
+## 第二轮候选：缓存槽位管理
+
+第一轮成对作业 dlc1w5yayz15qg4h，SHAffdd4995846e3652bf96021e6bea6b362999e69e，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/paired01，当前加载中。第二轮将WanAttention的id/mask/is_pred放CPU，K/V仍在原GPU；容量不足时显式在原K/V设备argsort，保留不稳定排序的原设备同值顺序。诊断按baseline/candidate切换原/新init_kv_cache、allocate_slots，每次reset重建缓存，确保基线不包含该优化。既有诊断中增加80次真实方法操作对照，覆盖容量不足/部分淘汰/临时回退/预测清理；CPU DSW环境测试通过，GPU同值顺序验证将在下一单卡作业启动前执行，未通过则不启动测评。静态语法/diff检查通过，真实回合和GPU验证尚待运行。
