@@ -204,22 +204,24 @@ def client(root):
 
 
 def compare(root, key, other):
-    a, b = [json.loads((root/v/(key+'.json')).read_text()) for v in ['baseline', other]]
+    reference = 'repeat' if other == 'candidate' and (root/'repeat'/(key+'.json')).exists() else 'baseline'
+    a, b = [json.loads((root/v/(key+'.json')).read_text()) for v in [reference, other]]
     for field in ['seed', 'instruction', 'success', 'actions', 'initial_scene_sha256', 'initial_observation_sha256']:
         assert a['result'][field] == b['result'][field], field
     for field in ['actions', 'observations']:
         assert [{k:v for k,v in row.items() if k!='seconds'} for row in a[field]] == [{k:v for k,v in row.items() if k!='seconds'} for row in b[field]], field
-    rows = [[json.loads(l) for l in (root/v/(key+'-server.jsonl')).read_text().splitlines()] for v in ['baseline', other]]
+    rows = [[json.loads(l) for l in (root/v/(key+'-server.jsonl')).read_text().splitlines()] for v in [reference, other]]
     for field in ['inputs', 'output', 'rng_before', 'rng_after']:
         assert [r[field] for r in rows[0]] == [r[field] for r in rows[1]], field
     assert [[v['value'] for v in r['encoded']] for r in rows[0]] == [[v['value'] for v in r['encoded']] for r in rows[1]], 'encoded latents'
-    summary = dict(passed=True, case=key, comparison=other, baseline=a['result'], candidate=b['result'],
+    summary = dict(passed=True, case=key, comparison=other, reference=reference, baseline=a['result'], candidate=b['result'],
                    total_observations=[len(v['observations']) for v in [a,b]], rpc_counts=[len(v) for v in rows],
                    rpc_seconds=[sum(r['seconds'] for r in v) for v in rows],
                    render_seconds=[sum(r['seconds'] for r in v['observations']) for v in [a,b]],
                    simulation_seconds=[sum(r['seconds'] for r in v['actions']) for v in [a,b]],
                    speedup=a['result']['seconds']/b['result']['seconds'])
-    put(root/(key+'-'+other+'-comparison.json'), summary)
+    suffix = '-warm' if reference == 'repeat' else ''
+    put(root/(key+'-'+other+suffix+'-comparison.json'), summary)
     print(json.dumps(summary), flush=True)
 
 
@@ -261,7 +263,8 @@ def check_cache(device):
     return dict(passed=True, operations=80, device=str(device))
 
 
-def run(root, baseline_only):
+def run(root, baseline_only, long_cases=False):
+    cases = [CASES[0], ('clean', 'open_microwave', 99), ('randomized', 'open_microwave', 1)] if long_cases else CASES
     root.mkdir(parents=True, exist_ok=True)
     for v in ['baseline', 'repeat', 'candidate', 'server']:
         (root/v).mkdir()
@@ -285,7 +288,7 @@ def run(root, baseline_only):
         (bundle/name).symlink_to(target, target_is_directory=True)
     cfg.update(wan22_pretrained_model_name_or_path=str(bundle), infer_mode='server', save_root=str(root/'server'), host='127.0.0.1', port=PORT, enable_wandb=False)
     put(root/'server-config.json',cfg)
-    put(root/'contract.json',dict(gpu=gpu, checkpoint=str(CK), cases=CASES, baseline_only=baseline_only,
+    put(root/'contract.json',dict(gpu=gpu, checkpoint=str(CK), cases=cases, baseline_only=baseline_only,
                                  candidate_sha=subprocess.check_output(['git','-C',str(NEW),'rev-parse','HEAD'],text=True).strip()))
     libs = json.loads((B/'runs/fastwam-h800-smoke-20261008/system-libs-prepared.json').read_text())
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONUNBUFFERED='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
@@ -305,7 +308,7 @@ def run(root, baseline_only):
             if time.monotonic()>deadline: raise TimeoutError('server startup')
             time.sleep(3)
         print('SERVER_READY',flush=True)
-        for index, case in enumerate(CASES):
+        for index, case in enumerate(cases):
             key = '-'.join(map(str,case))
             variants = ['baseline', 'repeat'] if index == 0 else ['baseline']
             if not baseline_only: variants.append('candidate')
@@ -329,6 +332,7 @@ if __name__ == '__main__':
     parser.add_argument('mode',choices=['run','server','client'])
     parser.add_argument('root',type=Path)
     parser.add_argument('--baseline-only',action='store_true')
+    parser.add_argument('--long-cases',action='store_true')
     args = parser.parse_args()
-    if args.mode == 'run': run(args.root,args.baseline_only)
+    if args.mode == 'run': run(args.root,args.baseline_only,args.long_cases)
     else: globals()[args.mode](args.root)

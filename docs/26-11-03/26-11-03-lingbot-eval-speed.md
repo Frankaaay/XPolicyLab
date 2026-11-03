@@ -29,3 +29,15 @@
 ## 单卡推理分片开销
 
 第一轮Clean严格对照通过，64动作/18观察/6 RPC；冷基线82.788s，热重复70.462s，候选70.542s，当前无实质端到端收益，不把冷/热差当提速。进一步定向修改_configure_model：仅eval_mode且world_size=1跳过FSDP，训练和多卡继续原分片；5项分派测试通过。第二轮诊断同时加载原FSDP和候选普通Transformer（同一GPU、相同checkpoint），逐参数验证推理BF16精度下权重一致，第二次加载前后恢复torch RNG；按变体切换模型。VAE/文本编码器共享，模型额外占用在80GiB单卡内验证。两臂KV方法独立选择，回合输入/latent/动作/RNG逐项验证，不降低精度或采样。
+
+## 第二轮单卡实测启动
+
+第一轮Random静态64步通过精确对照：75.946→74.190s（1.024x），推理19.975→19.950s，仍无重大提升。为避免继续消耗GPU验证已知低收益组合，停止本轮诊断dlc1w5yayz15qg4h，API确认Stopped；动态灯光尚未完成，不声称已通过。保留全部partial输出。更新隔离clone至af51c19a5ac81109092c7a34b3b1f1f329225b0e，提交第二轮dlc19eztajlbf14m，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/paired02，同一闲时配额单卡限制，先GPU缓存80操作与推理权重门禁，后Clean/Random完整对照。
+
+paired02已通过CUDA缓存80操作门禁及839个参数张量的推理精度权重一致门禁，server ready后进入Clean。此时尚无第二轮完整回合速度结论。
+
+## 第二轮Clean重大推理提升
+
+63动作/17观察/6 RPC全部严格一致，含每次观察、编码latent、动作、环境与模型RNG。热基线69.391820s，候选57.558541s，端到端1.206x/耗时下降17.05%；推理20.151484→8.602011s，2.343x。模型RPC合计20.763939→8.913139s。原诊断candidate comparison引用首次冷基线81.630756s并显示1.418x，该数不能作热态收益；本地诊断修正为若存在已通过的repeat则用repeat作候选参照，并写单独warm comparison。后续Random尚待完成。
+
+第二轮全部短回合对照通过。Random静态64步74.692844→63.134861s（1.183x），推理20.377916→8.482921s（2.402x）；动态58步74.304687→61.081541s（1.216x），推理20.379868→8.232435s（2.476x）。全部输入/latent/动作/RNG/成功结果严格一致。为覆盖真实长轨迹缓存淘汰，在既有tests诊断增加--long-cases：保留Clean click_bell/0作热态门禁，随后原冻结Clean open_microwave/99和Random open_microwave/1，原生上限/seed/instruction不变。继续单卡闲时，短回合结果不足以声明完整5000回合耗时。
