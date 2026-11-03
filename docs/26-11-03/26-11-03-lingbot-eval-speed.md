@@ -41,3 +41,13 @@ paired02已通过CUDA缓存80操作门禁及839个参数张量的推理精度权
 63动作/17观察/6 RPC全部严格一致，含每次观察、编码latent、动作、环境与模型RNG。热基线69.391820s，候选57.558541s，端到端1.206x/耗时下降17.05%；推理20.151484→8.602011s，2.343x。模型RPC合计20.763939→8.913139s。原诊断candidate comparison引用首次冷基线81.630756s并显示1.418x，该数不能作热态收益；本地诊断修正为若存在已通过的repeat则用repeat作候选参照，并写单独warm comparison。后续Random尚待完成。
 
 第二轮全部短回合对照通过。Random静态64步74.692844→63.134861s（1.183x），推理20.377916→8.482921s（2.402x）；动态58步74.304687→61.081541s（1.216x），推理20.379868→8.232435s（2.476x）。全部输入/latent/动作/RNG/成功结果严格一致。为覆盖真实长轨迹缓存淘汰，在既有tests诊断增加--long-cases：保留Clean click_bell/0作热态门禁，随后原冻结Clean open_microwave/99和Random open_microwave/1，原生上限/seed/instruction不变。继续单卡闲时，短回合结果不足以声明完整5000回合耗时。
+
+paired02作业API已Succeeded，GPU释放。长回合补充作业dlc1ty9zbfy279vh，精确SHA7a525a2175d5106bac0a12bd2c59d1dc92e6cdc8，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/long01，既有测试run附加--long-cases，仍1GPU/priority4/ForceQuotaOverSold/180min。提交前确认旧作业终止及远端clone clean后ff更新，没有重叠GPU占用。
+
+## 长回合Clean通过
+
+long01再次复核Clean短63步热基线74.194404→63.377022s，推理21.472956→9.133512s，严格一致。Clean open_microwave/99完整1500步（均失败）883.862998→631.767469s，1.3990x，节省28.522%；推理410.697500→165.892356s，2.4757x；RPC424.796893→172.772679s。376观察、96 RPC、所有动作/环境与模型RNG/输入/latent/结果严格一致，覆盖实际72帧缓存窗口之后的淘汰。渲染202.577466→202.289454s、仿真219.460763→219.964693s基本不变，收益来自推理。Random长回合继续运行，当前不能声称全套完成。
+
+## 闲时资源回收及定向补跑
+
+long01的Random基线完整1500步883.428333s、推理381.852209s、376观察，均失败。候选完成24 RPC后停止推进；API确认dlc1ty9zbfy279vh Failed，ReasonMessage为pod being preempted/evicted，非代码/仿真错误。候选已完成前缀逐项一致，但没有完整结果，禁止用其估计整回合耗时。保留全部产物。既有诊断增加--random-long-only，仅复核短Clean热态门禁及Random open_microwave/1完整成对，不重复已完成Clean长回合；原始模型RNG起点只保存在旧进程内，故不能把旧基线和新进程候选拼接，必须重新成对。新诊断将每个基线起点的实际CPU/CUDA/Python/NumPy RNG保存到输出目录，以保留资源回收后的复现证据；没有改变生产随机数规则或模型代码。继续原单卡闲时配额，不提高优先级或改用固定卡。

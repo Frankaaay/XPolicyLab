@@ -123,6 +123,7 @@ def server(root):
             if key not in states:
                 assert variant == 'baseline'
                 states[key] = (torch.get_rng_state(), torch.cuda.get_rng_state(), random.getstate(), np.random.get_state())
+                torch.save(states[key], root/'baseline'/(key+'-rng.pt'))
             cpu, gpu, py, npstate = states[key]
             torch.set_rng_state(cpu)
             torch.cuda.set_rng_state(gpu)
@@ -263,8 +264,10 @@ def check_cache(device):
     return dict(passed=True, operations=80, device=str(device))
 
 
-def run(root, baseline_only, long_cases=False):
+def run(root, baseline_only, long_cases=False, random_long_only=False):
     cases = [CASES[0], ('clean', 'open_microwave', 99), ('randomized', 'open_microwave', 1)] if long_cases else CASES
+    if random_long_only:
+        cases = [CASES[0], ('randomized', 'open_microwave', 1)]
     root.mkdir(parents=True, exist_ok=True)
     for v in ['baseline', 'repeat', 'candidate', 'server']:
         (root/v).mkdir()
@@ -333,6 +336,7 @@ if __name__ == '__main__':
     parser.add_argument('root',type=Path)
     parser.add_argument('--baseline-only',action='store_true')
     parser.add_argument('--long-cases',action='store_true')
+    parser.add_argument('--random-long-only',action='store_true')
     args = parser.parse_args()
-    if args.mode == 'run': run(args.root,args.baseline_only,args.long_cases)
+    if args.mode == 'run': run(args.root,args.baseline_only,args.long_cases,args.random_long_only)
     else: globals()[args.mode](args.root)
