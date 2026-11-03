@@ -45,6 +45,7 @@ class VA_Server:
         self.cache_name = 'pos'
         self.job_config = job_config
         self.save_root = job_config.save_root
+        self.save_visualization = True
         self.dtype = job_config.param_dtype
         self.device = torch.device(f"cuda:{job_config.local_rank}")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
@@ -580,17 +581,18 @@ class VA_Server:
 
         actions[:, ~self.action_mask] *= 0
 
-        save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
-        save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
+        if self.save_visualization:
+            save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
+            save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
 
         actions = self.postprocess_action(actions)
-        torch.cuda.empty_cache()
         return actions, latents
 
     def _compute_kv_cache(self, obs):
         ### optional async save obs for debug
         self.transformer.clear_pred_cache(self.cache_name)
-        save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
+        if self.save_visualization:
+            save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         latent_model_input = self._encode_obs(obs)
         if self.frame_st_id == 0:
             latent_model_input = torch.cat(
@@ -621,11 +623,11 @@ class VA_Server:
                              update_cache=2,
                              cache_name=self.cache_name,
                              action_mode=True)
-        torch.cuda.empty_cache()
         self.frame_st_id += latent_model_input.shape[2]
 
     @torch.no_grad()
     def infer(self, obs):
+        self.save_visualization = obs.get('save_visualization', True)
         reset = obs.get('reset', False)
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)

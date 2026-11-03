@@ -13,3 +13,7 @@
 ## baseline01 故障与基线修正
 
 单卡作业 dlc4wg2kreee6gcs 已 Failed，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/baseline01。首次推理后 KV 更新报 Float/BFloat16 不匹配，未完成回合。定位到旧1a96f3d遗漏历史修复5a7c8bc3；当前共享服务端815a2d3相对旧版仅增加该dtype修复及输出目录名哈希修复。复用815a2d3服务端作为可运行基线，候选同步相同两项修复；修复不计提速收益。模型、输入、采样、灯光均未改变。下一次 baseline02 使用修正后两次Clean对照及两项Random基线。
+
+## 第一轮候选
+
+修正基线作业 dlc1dunp57e8qs7f，SHA7271b4f1013413cce151c91edddffef3e86ae140，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/baseline02，服务端已就绪。首轮候选仅调整 wan_va_server.py：遵守现有请求save_visualization=False，默认仍写出；移除_infer和_compute_kv_cache末尾empty_cache，保留_reset清理。AST语法及diff检查通过，实际infer方法在reset/KV/infer及默认/显式开启共5项轻量分派检查通过；尚无GPU候选验证/速度结果。不改采样/输入/RNG/模型。
