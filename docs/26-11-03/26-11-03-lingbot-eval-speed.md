@@ -51,3 +51,27 @@ long01再次复核Clean短63步热基线74.194404→63.377022s，推理21.472956
 ## 闲时资源回收及定向补跑
 
 long01的Random基线完整1500步883.428333s、推理381.852209s、376观察，均失败。候选完成24 RPC后停止推进；API确认dlc1ty9zbfy279vh Failed，ReasonMessage为pod being preempted/evicted，非代码/仿真错误。候选已完成前缀逐项一致，但没有完整结果，禁止用其估计整回合耗时。保留全部产物。既有诊断增加--random-long-only，仅复核短Clean热态门禁及Random open_microwave/1完整成对，不重复已完成Clean长回合；原始模型RNG起点只保存在旧进程内，故不能把旧基线和新进程候选拼接，必须重新成对。新诊断将每个基线起点的实际CPU/CUDA/Python/NumPy RNG保存到输出目录，以保留资源回收后的复现证据；没有改变生产随机数规则或模型代码。继续原单卡闲时配额，不提高优先级或改用固定卡。
+
+补跑SHA9db6c6a7df1841ef8761c33f21dbbd791e8cd24a，作业dlc1ld68ejadxg34，输出 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/random-long02，run --random-long-only。远端GitHub直连停滞/超时，核验/proc cwd和cmdline后仅终止自己卡住的git-remote-https请求；临时SSH反向转发至本机已有HTTP代理后，同一origin正常fetch并ff，随后转发随SSH退出关闭。未改变origin、分支、目标SHA或使用旁路worktree；提交前核验远端clean且HEAD匹配。
+
+## 最终验收与汇总
+
+Random定向补跑dlc1ld68ejadxg34已由API确认Succeeded；本次测速GPU作业结束。其余诊断基线失败/主动停止/闲时回收状态均保留历史，不改既有正式任务。仅使用H800集群一张闲时GPU，实际设备报告NVIDIA L20Y/Hopper 9.0、81559MiB。全程没有并行占用第二张卡、提升优先级或使用固定资源。
+
+| 固定回合 | 动作/结果 | 热态基线秒 | 候选秒 | 端到端加速 | 推理秒（旧→新） | 推理加速 |
+|---|---|---:|---:|---:|---|---:|
+| Clean click_bell/0，seed100000 |63/成功|69.391820|57.558541|1.2056x|20.151484→8.602011|2.3426x|
+| Random click_bell/0，seed100000，静态灯光 |64/成功|74.692844|63.134861|1.1831x|20.377916→8.482921|2.4022x|
+| Random click_bell/19，seed100019，动态灯光 |58/成功|74.304687|61.081541|1.2165x|20.379868→8.232435|2.4756x|
+| Clean open_microwave/99，seed100132 |1500/失败|883.862998|631.767469|1.3990x|410.697500→165.892356|2.4757x|
+| Random open_microwave/1，seed100001，静态灯光 |1500/失败|867.604315|632.836522|1.3710x|384.726765→156.071808|2.4651x|
+
+以上5个代表回合共3185动作、803观察、210 RPC，成对的全部观察/模型输入/编码latent/原始输出动作/执行动作/环境与模型RNG/初始场景及成功结果严格相同。两个长回合均保留原生1500步失败结果，覆盖真实72帧KV窗口后的淘汰。短回合Clean取已通过重复门禁的热态repeat，绝不使用初次冷启动收益。每个回合在同一作业内成对，跨作业数字不拼接。两项长回合分别节省28.522%与27.059%，均约少4分钟。
+
+Random长回合RPC397.221476→162.422100s，渲染228.248654→228.033918s、仿真210.144315→210.034308s，明确表明主要收益来自推理。原25/50采样步、CFG5/1、checkpoint_step_50000、所有KV图像帧、冻结seed/instruction和灯光规则不变。
+
+验证：每次GPU作业均通过80次缓存操作精确对照（含部分淘汰同值排序、临时恢复与预测清理）及839参数张量推理精度核验；CPU同类80操作、5项infer分派和5项configure分派检查通过，后者覆盖单卡eval/单卡train/多卡及未初始化情形。静态语法与diff检查通过。主生产改动局限于单卡eval跳过FSDP、CPU槽位元数据（保留GPU原排序）、遵守已有save_visualization及减少逐块empty_cache；两项旧兼容修复已单列且不计提速。
+
+证据：短回合paired02（测试SHAaf51c19a5ac81109092c7a34b3b1f1f329225b0e）；Clean长回合long01（7a525a2175d5106bac0a12bd2c59d1dc92e6cdc8）；Random长回合random-long02（9db6c6a7df1841ef8761c33f21dbbd791e8cd24a）。目录均在 /mnt/workdir/frank/runs/lingbot-eval-speed-20261103/，保留contract.json、cache-check.json、model-weight-check.json、*-candidate[-warm]-comparison.json、逐步JSON/JSONL及日志。后两测试SHA相对af51c19仅调整测试/文档，生产代码一致。
+
+这是固定代表回合的单卡性能验证，不是全部50任务×100回合的正式成绩或全量时长；多卡吞吐未在本轮验证。独立分支frank/lingbot-eval-speed推送Frank fork，不合并、不修改现有正式评测作业。本轮目标已达到，停止继续占用GPU优化。
