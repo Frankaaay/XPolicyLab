@@ -57,9 +57,14 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--base-model', required=True)
     p.add_argument('--stereotok-checkpoint', help='Selected frozen u15853 export; reads matching right eyes')
+    p.add_argument('--wan-bino', action='store_true',
+                   help='Naive binocular Wan baseline: per-eye Wan latents joined along width before flattening')
     p.add_argument('--start', type=int, default=0)
     p.add_argument('--count', type=int, required=True)
     args = p.parse_args()
+    if args.wan_bino and args.stereotok_checkpoint:
+        raise ValueError('The Wan binocular baseline uses the native Wan VAE without a StereoTok checkpoint')
+    stereo = bool(args.stereotok_checkpoint) or args.wan_bino
     rows = enumerate_inputs(args.kind, args.source)[args.start:args.start + args.count]
     if len(rows) != args.count or args.start < 0 or args.count < 1:
         raise ValueError('Requested range is outside the source')
@@ -69,7 +74,7 @@ def main():
     (args.output / 'meta').mkdir()
     (args.output / 'source-episodes.json').write_text(json.dumps(rows, indent=2))
     vae = load_vae(str(Path(args.base_model) / 'vae'), torch.bfloat16, 'cuda',
-                   stereotok_checkpoint=args.stereotok_checkpoint)
+                   stereotok_checkpoint=args.stereotok_checkpoint, wan_bino=args.wan_bino)
     wrapper = WanVAEStreamingWrapper(vae)
     tokenizer = load_tokenizer(str(Path(args.base_model) / 'tokenizer'))
     text_encoder = load_text_encoder(str(Path(args.base_model) / 'text_encoder'), torch.bfloat16, 'cuda')
@@ -108,7 +113,7 @@ def main():
                 if args.kind == 'robotwin':
                     images = group[f'observation/{source_key}/rgb']
                     frames = np.stack([decode_image_bit(images[int(i)]) for i in ids])
-                    if args.stereotok_checkpoint:
+                    if stereo:
                         right_images = group[f'observation/{source_key}_right/rgb']
                         right_frames = np.stack([decode_image_bit(right_images[int(i)]) for i in ids])
                 else:
@@ -119,9 +124,9 @@ def main():
                     frames = np.stack([images[int(i)] for i in ids])
                     if convention == 'opengl':
                         frames = frames[:, ::-1].copy()
-                    if args.stereotok_checkpoint:
+                    if stereo:
                         if handle['data'].attrs.get('pairing') != 'fresh-left+fresh-right':
-                            raise ValueError('StereoTok LIBERO requires admitted fresh paired data')
+                            raise ValueError('Stereo LIBERO requires admitted fresh paired data')
                         right_images = group[f'obs/{source_key}_right']
                         right_frames = np.stack([right_images[int(i)] for i in ids])
                         if convention == 'opengl':
@@ -130,10 +135,12 @@ def main():
                     raise ValueError('Image/action length mismatch')
                 if right_frames is not None and len(right_images) != n:
                     raise ValueError('Right image/action length mismatch')
-                latent, f, h, w = encode_video_latent(frames, vae, wrapper, 'cuda', torch.bfloat16, size,
-                                                     right_rgb=right_frames)
+                latent, f, h, w, _ = encode_video_latent(frames, vae, wrapper, 'cuda', torch.bfloat16, size,
+                                                        right_rgb=right_frames)
+                # Wan-bino latents already hold [left | right] along width, so w is the joined width.
                 rec = dict(latent=latent, latent_num_frames=f, latent_height=h, latent_width=w,
-                           video_num_frames=len(frame_ids), video_height=size[0], video_width=size[1],
+                           video_num_frames=len(frame_ids), video_height=size[0],
+                           video_width=size[1] * (2 if args.wan_bino else 1),
                            text_emb=text_cache[row['task']], text=row['task'], frame_ids=frame_ids,
                            frame_valid=valid.tolist(), start_frame=0, end_frame=n,
                            fps=fps / stride, ori_fps=fps,
@@ -159,6 +166,8 @@ def main():
                 splits={'train': f'0:{len(rows)}'},
                 data_path='data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet',
                 features=features)
+    if args.wan_bino:
+        info['vae_binding'] = dict(vae.binding)
     (args.output / 'meta/info.json').write_text(json.dumps(info, indent=2))
     for name, items in [('episodes', episodes), ('episodes_stats', stats),
                         ('tasks', [dict(task_index=i, task=t) for i, t in enumerate(tasks)])]:
