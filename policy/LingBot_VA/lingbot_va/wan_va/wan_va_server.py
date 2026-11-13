@@ -66,6 +66,7 @@ class VA_Server:
             torch_device='cpu' if self.enable_offload else self.device,
             stereotok_checkpoint=getattr(job_config, 'stereotok_checkpoint', None),
             stereotok_input_mode=getattr(job_config, 'stereotok_input_mode', 'stereo'),
+            wan_bino=getattr(job_config, 'wan_bino', False),
         )
         self.streaming_vae = WanVAEStreamingWrapper(self.vae)
 
@@ -103,6 +104,7 @@ class VA_Server:
                              'vae'),
                 torch_dtype=self.dtype,
                 torch_device='cpu' if self.enable_offload else self.device,
+                wan_bino=getattr(job_config, 'wan_bino', False),
             )
             self.streaming_vae_half = WanVAEStreamingWrapper(vae_half)
 
@@ -410,6 +412,8 @@ class VA_Server:
         else:
             self.latent_height, self.latent_width = self.height // 16, self.width // 16 * len(
                 self.job_config.obs_cam_keys)
+        if getattr(self.job_config, 'wan_bino', False):
+            self.latent_width *= 2
 
         patch_size = self.job_config.patch_size
         latent_token_per_chunk = (self.job_config.frame_chunk_size *

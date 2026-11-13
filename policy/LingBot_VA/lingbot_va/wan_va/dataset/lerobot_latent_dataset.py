@@ -133,6 +133,8 @@ class LatentLeRobotDataset(LeRobotDataset):
         mono_config = getattr(config, 'stereotok_input_mode', 'stereo') == 'mono-left'
         if mono_cache != mono_config:
             raise ValueError('LingBot config and cache disagree on StereoTok mono-left input')
+        if (binding.get('format') == 'wan2.2-vae-bino-lr') != bool(getattr(config, 'wan_bino', False)):
+            raise ValueError('LingBot config and cache disagree on the Wan binocular baseline')
         if mono_config and (not getattr(config, 'stereotok_checkpoint', None) or
                             binding.get('sha256') != '61c6057b49bec9c52f96793a20247d3746978939f0551c37142bdbda6b252eae'):
             raise ValueError('LingBot mono-left cache must use the selected u15853 export')

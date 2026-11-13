@@ -8,6 +8,9 @@ from transformers import (
 
 from .model import WanTransformer3DModel
 
+# Naive binocular baseline: the frozen Wan VAE encodes each eye; per-camera latents are joined along width.
+WAN_BINO_FORMAT = "wan2.2-vae-bino-lr"
+
 
 def load_vae(
     vae_path,
@@ -15,7 +18,10 @@ def load_vae(
     torch_device,
     stereotok_checkpoint=None,
     stereotok_input_mode="stereo",
+    wan_bino=False,
 ):
+    if wan_bino and stereotok_checkpoint is not None:
+        raise ValueError('The Wan binocular baseline does not use a StereoTok checkpoint')
     if stereotok_checkpoint is not None:
         from .stereotok import StereoTokAutoencoder
         return StereoTokAutoencoder(stereotok_checkpoint, torch_device, input_mode=stereotok_input_mode)
@@ -25,6 +31,9 @@ def load_vae(
         vae_path,
         torch_dtype=torch_dtype,
     )
+    if wan_bino:
+        vae.requires_stereo = True
+        vae.binding = {"format": WAN_BINO_FORMAT, "latent_layout": "per-camera-cat-width-left-right"}
     return vae.to(torch_device)
 
 
@@ -77,6 +86,7 @@ class WanVAEStreamingWrapper:
         self.vae = vae_model
         self.stereo = bool(getattr(vae_model, 'requires_stereo', False))
         self.stereotok = getattr(vae_model, 'binding', {}).get('format') == 'stereotok-student-v3'
+        self.bino = getattr(vae_model, 'binding', {}).get('format') == WAN_BINO_FORMAT
         if self.stereotok:
             from fastwam.models.wan22.stereotok.vae2_2 import count_conv3d
             self.encoder = vae_model.model.encoder
@@ -101,6 +111,9 @@ class WanVAEStreamingWrapper:
 
     def clear_cache(self):
         self.feat_cache = [None] * self.enc_conv_num
+        if self.bino:
+            # Each eye streams through its own causal conv cache.
+            self.right_feat_cache = [None] * self.enc_conv_num
         if self.stereotok:
             self.geometry_cache = [None] * self.geometry_conv_num
             self.first_chunk = True
@@ -148,6 +161,11 @@ class WanVAEStreamingWrapper:
             self.first_chunk = False
             self.stream_shape = shape
             return result
+        if self.bino:
+            if right_chunk is None or x_chunk.shape != right_chunk.shape or x_chunk.ndim != 5:
+                raise ValueError('Wan binocular baseline requires matching [B,3,T,H,W] eyes')
+            return torch.cat([self._encode_native(x_chunk, self.feat_cache),
+                              self._encode_native(right_chunk, self.right_feat_cache)], dim=-1)
         if self.stereo:
             if right_chunk is None or x_chunk.shape != right_chunk.shape or x_chunk.ndim != 5:
                 raise ValueError('StereoTok streaming requires matching real [B,3,T,H,W] eyes')
@@ -176,12 +194,15 @@ class WanVAEStreamingWrapper:
             return result
         if right_chunk is not None:
             raise ValueError('Right-eye input supplied to native LingBot VAE')
+        return self._encode_native(x_chunk, self.feat_cache)
+
+    def _encode_native(self, x_chunk, feat_cache):
         if hasattr(self.vae.config,
                    "patch_size") and self.vae.config.patch_size is not None:
             x_chunk = patchify(x_chunk, self.vae.config.patch_size)
         feat_idx = [0]
         out = self.encoder(x_chunk,
-                           feat_cache=self.feat_cache,
+                           feat_cache=feat_cache,
                            feat_idx=feat_idx)
         enc = self.quant_conv(out)
         return enc

@@ -214,6 +214,7 @@ def main():
     ap.add_argument("--device", default="cuda", help="Torch device.")
     ap.add_argument("--stereotok-checkpoint", help="Selected frozen u15853 student export.")
     ap.add_argument("--stereotok-input-mode", choices=("stereo", "mono-left"), default="stereo")
+    ap.add_argument("--wan-bino", action="store_true", help="Naive binocular Wan baseline: per-eye Wan latents joined along width.")
     ap.add_argument("--right-camera-map", help="JSON mapping each configured left camera to its true right eye.")
     ap.add_argument("--resume", action="store_true", help="Resume only provenance-matched, checksum-verified episodes.")
     args = ap.parse_args()
@@ -230,8 +231,10 @@ def main():
     right_camera_map = json.loads(Path(args.right_camera_map).read_text()) if args.right_camera_map else None
     if args.stereotok_input_mode == 'mono-left' and (not args.stereotok_checkpoint or right_camera_map is not None):
         raise ValueError('Mono-left requires a StereoTok checkpoint and no right-camera map')
-    if args.stereotok_input_mode == 'stereo' and bool(args.stereotok_checkpoint) != bool(right_camera_map):
-        raise ValueError('StereoTok checkpoint and admitted right-camera map must be supplied together')
+    if args.wan_bino and (args.stereotok_checkpoint or args.stereotok_input_mode != 'stereo'):
+        raise ValueError('The Wan binocular baseline uses the native Wan VAE without StereoTok options')
+    if args.stereotok_input_mode == 'stereo' and bool(args.stereotok_checkpoint or args.wan_bino) != bool(right_camera_map):
+        raise ValueError('A stereo codec and admitted right-camera map must be supplied together')
     if right_camera_map is not None:
         if set(right_camera_map) != set(LATENT_CAM_KEYS) or len(set(right_camera_map.values())) != len(LATENT_CAM_KEYS):
             raise ValueError('Right-camera map must cover each view exactly once')
@@ -262,6 +265,7 @@ def main():
                     episode_ids=[e['episode_index'] for e in episodes],
                     stereotok_checkpoint=args.stereotok_checkpoint,
                     input_mode=args.stereotok_input_mode, right_camera_map=right_camera_map,
+                    wan_bino=args.wan_bino,
                     converter_sha256=file_sha256(__file__),
                     metadata={name: file_sha256(src / 'meta' / name) for name in
                               ['info.json', 'episodes.jsonl', 'episodes_stats.jsonl', 'tasks.jsonl']})
@@ -292,7 +296,7 @@ def main():
 
     print("[process_data] loading Wan2.2 VAE + text encoder ...", flush=True)
     vae = load_vae(str(base / "vae"), dtype, device, stereotok_checkpoint=args.stereotok_checkpoint,
-                   stereotok_input_mode=args.stereotok_input_mode)
+                   stereotok_input_mode=args.stereotok_input_mode, wan_bino=args.wan_bino)
     wrapper = WanVAEStreamingWrapper(vae)
     tokenizer = load_tokenizer(str(base / "tokenizer"))
     text_encoder = load_text_encoder(str(base / "text_encoder"), dtype, device)
@@ -435,7 +439,7 @@ def main():
         feat["names"] = list(ACTION_NAMES_30)
         out_info["features"][key] = feat
     out_info["total_episodes"] = len(new_episodes)
-    if args.stereotok_input_mode == 'mono-left':
+    if args.stereotok_input_mode == 'mono-left' or args.wan_bino:
         out_info["vae_binding"] = dict(vae.binding)
     out_info["total_frames"] = total_frames
     out_info["total_chunks"] = (len(new_episodes) - 1) // chunks_size + 1

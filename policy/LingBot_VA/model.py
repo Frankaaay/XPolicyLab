@@ -208,7 +208,7 @@ class Model(ModelTemplate):
         # The server _infer() ignores obs['state']; only compute_kv_cache uses
         # state (passed separately as the full action chunk).
         image_dict = {key: observation[key] for key in self.obs_cam_keys}
-        if getattr(self.job_config, 'stereotok_checkpoint', None):
+        if getattr(self.job_config, 'stereotok_checkpoint', None) or getattr(self.job_config, 'wan_bino', False):
             image_dict.update({key + '_right': observation[key + '_right'] for key in self.obs_cam_keys})
         return {
             "obs": [image_dict],
@@ -221,7 +221,7 @@ class Model(ModelTemplate):
 
         for observation in observation_list:
             image_dict = {key: observation[key] for key in self.obs_cam_keys}
-            if getattr(self.job_config, 'stereotok_checkpoint', None):
+            if getattr(self.job_config, 'stereotok_checkpoint', None) or getattr(self.job_config, 'wan_bino', False):
                 image_dict.update({key + '_right': observation[key + '_right'] for key in self.obs_cam_keys})
             obs_batch.append(image_dict)
             prompt = observation.get("task", prompt)
@@ -396,8 +396,8 @@ class Model(ModelTemplate):
 
     def update_obs_batch(self, obs_list):
         stereo_map = self.model_cfg.get('stereo_camera_map')
-        if bool(stereo_map) != bool(getattr(self.job_config, 'stereotok_checkpoint', None)):
-            raise ValueError('StereoTok and admitted stereo_camera_map must be configured together')
+        if bool(stereo_map) != bool(getattr(self.job_config, 'stereotok_checkpoint', None) or getattr(self.job_config, 'wan_bino', False)):
+            raise ValueError('A stereo codec and admitted stereo_camera_map must be configured together')
         self._latest_env_idx_list = [obs.get("env_idx", index) for index, obs in enumerate(obs_list)]
         encoded_obs_list = [
             encode_obs(obs, self.action_type, self.robot_action_dim_info, self.default_prompt, stereo_map)
