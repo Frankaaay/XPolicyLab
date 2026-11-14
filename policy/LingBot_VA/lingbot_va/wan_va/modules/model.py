@@ -346,6 +346,7 @@ class WanAttention(torch.nn.Module):
                       device, dtype, batch_size):
         if self.attn_caches is None:
             return
+        # Slot bookkeeping is host-side; GPU nonzero/conditions synchronize every layer.
         self.attn_caches[cache_name] = {
             'k':
             torch.empty([batch_size, total_tolen, num_head, head_dim],
@@ -356,11 +357,11 @@ class WanAttention(torch.nn.Module):
                         device=device,
                         dtype=dtype),
             'id':
-            torch.full((total_tolen, ), -1, device=device),
+            torch.full((total_tolen, ), -1, device='cpu'),
             "mask":
-            torch.zeros((total_tolen, ), dtype=torch.bool, device=device),
+            torch.zeros((total_tolen, ), dtype=torch.bool, device='cpu'),
             "is_pred":
-            torch.zeros((total_tolen, ), dtype=torch.bool, device=device),
+            torch.zeros((total_tolen, ), dtype=torch.bool, device='cpu'),
         }
 
     def allocate_slots(self, cache_name, key_size):
@@ -373,7 +374,8 @@ class WanAttention(torch.nn.Module):
             used = mask.nonzero(as_tuple=False).squeeze(-1)
 
             used_ids = ids[used]
-            order = torch.argsort(used_ids)
+            # Preserve the original device's tie ordering when evicting old slots.
+            order = torch.argsort(used_ids.to(cache['k'].device)).to(used.device)
             need = key_size - free.numel()
             to_free = used[order[:need]]
 
