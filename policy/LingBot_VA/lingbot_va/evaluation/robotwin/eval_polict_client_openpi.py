@@ -43,6 +43,55 @@ from pathlib import Path
 from evaluation.robotwin.websocket_client_policy import WebsocketClientPolicy
 from evaluation.robotwin.test_render import Sapien_TEST
 
+_GUARD_ANCHOR = (
+    "        imageStore(outPosition, ivec2(gl_LaunchIDEXT.xy), vec4(position.xyz, ndc.z / ndc.w));\n"
+    "      }\n"
+)
+_GUARD = (
+    "\n"
+    "      // A fully absorbing hit leaves zero throughput and no outgoing direction.\n"
+    "      // Do not submit that degenerate ray to the Vulkan traversal backend.\n"
+    "      // Preserve this hit's radiance/G-buffer writes and every nonzero ray path.\n"
+    "      if (all(equal(ray.direction, vec3(0.0))) && all(equal(ray.attenuation, vec3(0.0)))) {\n"
+    "        break;\n"
+    "      }\n"
+)
+
+
+def _install_h100_render_guard():
+    """Port Orion af79cc7912dce5020d3ad283115d3591f043bc84's RT guard."""
+    import hashlib
+    import shutil
+    import tempfile
+    import torch
+
+    if not torch.cuda.is_available() or "H100" not in torch.cuda.get_device_name():
+        return
+    import sapien
+
+    set_shader_dir = sapien.render.set_camera_shader_dir
+    if getattr(set_shader_dir, "_h100_render_guard", False):
+        return
+    source = Path(sapien.__file__).parent / "vulkan_shader" / "rt"
+    original = (source / "camera.rgen").read_bytes()
+    text = original.decode("utf-8")
+    if text.count(_GUARD_ANCHOR) != 1 or _GUARD in text:
+        raise RuntimeError(f"Unexpected SAPIEN rt camera shader at {source}; cannot install render guard.")
+    patched = text.replace(_GUARD_ANCHOR, _GUARD_ANCHOR + _GUARD).encode("utf-8")
+    # Keep a unique private copy; never remove or overwrite an existing runtime.
+    target = Path(tempfile.mkdtemp(prefix="sapien_rt_guard."))
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    (target / "camera.rgen").write_bytes(patched)
+
+    def guarded(path):
+        return set_shader_dir(str(target) if path == "rt" else path)
+
+    guarded._h100_render_guard = True
+    sapien.render.set_camera_shader_dir = guarded
+    print("H100_RENDER_GUARD", target, "source_sha256=" + hashlib.sha256(original).hexdigest(),
+          "patched_sha256=" + hashlib.sha256(patched).hexdigest(), flush=True)
+
+
 def write_json(data: dict, fpath: Path) -> None:
     """Write data to a JSON file.
 
@@ -694,6 +743,7 @@ def parse_args_and_config():
 
 if __name__ == "__main__":
     
+    _install_h100_render_guard()
     Sapien_TEST()
     usr_args = parse_args_and_config()
     main(usr_args)
