@@ -17,6 +17,7 @@ matplotlib
 ftfy
 safetensors
 Pillow
+timm==1.0.20
 
 # Post-training
 lerobot==0.3.3

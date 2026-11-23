@@ -70,7 +70,7 @@ def ensure_hwc_uint8(image):
     raise ValueError(f"Unsupported image shape: {image.shape}")
 
 
-def encode_obs(observation, action_type, robot_action_dim_info, default_prompt):
+def encode_obs(observation, action_type, robot_action_dim_info, default_prompt, stereo_camera_map=None):
     images = {
         "cam_high": ensure_hwc_uint8(
             extract_image(observation, ["cam_high", "cam_head", "head_camera", "top_camera"])
@@ -95,13 +95,25 @@ def encode_obs(observation, action_type, robot_action_dim_info, default_prompt):
 
     prompt = observation.get("instruction") or observation.get("prompt") or default_prompt
 
-    return {
+    result = {
         "observation.images.cam_high": images["cam_high"],
         "observation.images.cam_left_wrist": images["cam_left_wrist"],
         "observation.images.cam_right_wrist": images["cam_right_wrist"],
         "observation.state": state,
         "task": prompt,
     }
+    if stereo_camera_map is not None:
+        expected = {'observation.images.' + key for key in images}
+        if set(stereo_camera_map) != expected or len(set(stereo_camera_map.values())) != len(expected):
+            raise ValueError('Stereo camera map must identify all three independent right eyes')
+        left_aliases = {'cam_high', 'cam_head', 'head_camera', 'top_camera',
+                        'cam_left_wrist', 'left_camera', 'left_wrist', 'wrist_left',
+                        'cam_right_wrist', 'right_camera', 'right_wrist', 'wrist_right'}
+        if left_aliases.intersection(stereo_camera_map.values()):
+            raise ValueError('A left-eye camera cannot supply a right-eye observation')
+        for left_key, source_key in stereo_camera_map.items():
+            result[left_key + '_right'] = ensure_hwc_uint8(extract_image(observation, [source_key]))
+    return result
 
 
 class Model(ModelTemplate):
@@ -196,6 +208,8 @@ class Model(ModelTemplate):
         # The server _infer() ignores obs['state']; only compute_kv_cache uses
         # state (passed separately as the full action chunk).
         image_dict = {key: observation[key] for key in self.obs_cam_keys}
+        if getattr(self.job_config, 'stereotok_checkpoint', None):
+            image_dict.update({key + '_right': observation[key + '_right'] for key in self.obs_cam_keys})
         return {
             "obs": [image_dict],
             "prompt": observation["task"],
@@ -207,6 +221,8 @@ class Model(ModelTemplate):
 
         for observation in observation_list:
             image_dict = {key: observation[key] for key in self.obs_cam_keys}
+            if getattr(self.job_config, 'stereotok_checkpoint', None):
+                image_dict.update({key + '_right': observation[key + '_right'] for key in self.obs_cam_keys})
             obs_batch.append(image_dict)
             prompt = observation.get("task", prompt)
 
@@ -379,9 +395,12 @@ class Model(ModelTemplate):
         self.update_obs_batch([obs])
 
     def update_obs_batch(self, obs_list):
+        stereo_map = self.model_cfg.get('stereo_camera_map')
+        if bool(stereo_map) != bool(getattr(self.job_config, 'stereotok_checkpoint', None)):
+            raise ValueError('StereoTok and admitted stereo_camera_map must be configured together')
         self._latest_env_idx_list = [obs.get("env_idx", index) for index, obs in enumerate(obs_list)]
         encoded_obs_list = [
-            encode_obs(obs, self.action_type, self.robot_action_dim_info, self.default_prompt)
+            encode_obs(obs, self.action_type, self.robot_action_dim_info, self.default_prompt, stereo_map)
             for obs in obs_list
         ]
         self.observation_window = encoded_obs_list

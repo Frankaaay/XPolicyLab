@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -63,6 +64,8 @@ class VA_Server:
                          'vae'),
             torch_dtype=self.dtype,
             torch_device='cpu' if self.enable_offload else self.device,
+            stereotok_checkpoint=getattr(job_config, 'stereotok_checkpoint', None),
+            stereotok_input_mode=getattr(job_config, 'stereotok_input_mode', 'stereo'),
         )
         self.streaming_vae = WanVAEStreamingWrapper(self.vae)
 
@@ -95,7 +98,7 @@ class VA_Server:
         self.env_type = job_config.env_type
         self.streaming_vae_half = None
         if self.env_type == 'robotwin_tshape':
-            vae_half = load_vae(
+            vae_half = self.vae if getattr(self.vae, 'binding', {}).get('format') == 'stereotok-student-v3' else load_vae(
                 os.path.join(job_config.wan22_pretrained_model_name_or_path,
                              'vae'),
                 torch_dtype=self.dtype,
@@ -329,6 +332,7 @@ class VA_Server:
         if len(images) < 1:
             return None
         videos = []
+        right_videos = []
         for k_i, k in enumerate(self.job_config.obs_cam_keys):
             if self.env_type == 'robotwin_tshape':
                 if k_i == 0:  # camera high
@@ -346,6 +350,15 @@ class VA_Server:
                                             mode='bilinear',
                                             align_corners=False).unsqueeze(0)
             videos.append(history_video_k)
+            if getattr(self.vae, 'requires_stereo', False):
+                right_key = k + '_right'
+                if any(right_key not in each for each in images):
+                    raise ValueError(f'Missing synchronized stereo observation {right_key}')
+                right_k = torch.from_numpy(np.stack([each[right_key] for each in images])).float().permute(3, 0, 1, 2)
+                if right_k.shape != torch.from_numpy(np.stack([each[k] for each in images])).permute(3, 0, 1, 2).shape:
+                    raise ValueError(f'Left/right observation shape mismatch for {k}')
+                right_videos.append(F.interpolate(right_k, size=(height_i, width_i),
+                    mode='bilinear', align_corners=False).unsqueeze(0))
 
         if self.env_type == 'robotwin_tshape':
             videos_high = videos[0] / 255.0 * 2.0 - 1.0
@@ -353,9 +366,11 @@ class VA_Server:
                                               dim=0) / 255.0 * 2.0 - 1.0
             vae_device = next(self.streaming_vae.vae.parameters()).device
             enc_out_high = self.streaming_vae.encode_chunk(
-                videos_high.to(vae_device).to(self.dtype))
+                videos_high.to(vae_device).to(self.dtype),
+                right_chunk=(right_videos[0] / 255.0 * 2.0 - 1.0).to(vae_device).to(self.dtype) if right_videos else None)
             enc_out_left_and_right = self.streaming_vae_half.encode_chunk(
-                videos_left_and_right.to(vae_device).to(self.dtype))
+                videos_left_and_right.to(vae_device).to(self.dtype),
+                right_chunk=(torch.cat(right_videos[1:], dim=0) / 255.0 * 2.0 - 1.0).to(vae_device).to(self.dtype) if right_videos else None)
             enc_out = torch.cat([
                 torch.cat(enc_out_left_and_right.split(1, dim=0), dim=-1),
                 enc_out_high
@@ -365,7 +380,8 @@ class VA_Server:
             videos = torch.cat(videos, dim=0) / 255.0 * 2.0 - 1.0
             vae_device = next(self.streaming_vae.vae.parameters()).device
             videos_chunk = videos.to(vae_device).to(self.dtype)
-            enc_out = self.streaming_vae.encode_chunk(videos_chunk)
+            enc_out = self.streaming_vae.encode_chunk(videos_chunk,
+                right_chunk=(torch.cat(right_videos, dim=0) / 255.0 * 2.0 - 1.0).to(vae_device).to(self.dtype) if right_videos else None)
 
         mu, logvar = torch.chunk(enc_out, 2, dim=1)
         latents_mean = torch.tensor(self.vae.config.latents_mean).to(mu.device)
@@ -435,7 +451,9 @@ class VA_Server:
                 dtype=self.dtype,
             )
 
-        self.exp_name = f"{prompt}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt else "default"
+        # Keep the original prompt for inference; only bound the output directory name.
+        prompt_id = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16] if prompt else None
+        self.exp_name = f"{prompt_id}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt_id else "default"
         self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
@@ -579,6 +597,9 @@ class VA_Server:
                 [self.init_latent, latent_model_input],
                 dim=2) if latent_model_input is not None else self.init_latent
 
+        # Keep VAE encoding/normalization precision, then match the DiT input
+        # contract used by _infer's BF16 latents and conditioning tensors.
+        latent_model_input = latent_model_input.to(device=self.device, dtype=self.dtype)
         action_model_input = self.preprocess_action(obs['state'])
         action_model_input = action_model_input.to(latent_model_input)
         logger.info(

@@ -23,7 +23,7 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_DIR="${ROOT_DIR}/XPolicyLab/policy/FastWAM"
-FASTWAM_DIR="${POLICY_DIR}/FastWAM"
+FASTWAM_DIR="${FASTWAM_SOURCE_ROOT:-${POLICY_DIR}/FastWAM}"
 UTILS_DIR="${ROOT_DIR}/XPolicyLab/utils"
 
 export CUDA_VISIBLE_DEVICES="${gpu_id}"

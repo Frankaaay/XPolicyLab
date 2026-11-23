@@ -1,5 +1,7 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import argparse
+import random
+import numpy as np
 import os
 import sys
 from pathlib import Path
@@ -14,6 +16,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
+    set_model_state_dict,
     StateDictOptions,
 )
 from safetensors.torch import save_file, load_file
@@ -50,17 +53,22 @@ import gc
 class Trainer:
     def __init__(self, config):
         if config.enable_wandb and config.rank == 0:
+            Path(config.save_root).mkdir(parents=True, exist_ok=True)
             wandb.login(host=os.environ['WANDB_BASE_URL'], key=os.environ['WANDB_API_KEY'])
             self.wandb = wandb
-            self.wandb.init(
+            run = self.wandb.init(
                 entity=os.environ["WANDB_TEAM_NAME"],
                 project=os.getenv("WANDB_PROJECT", "va_robotwin"),
-                # dir=log_dir,
+                dir=config.save_root,
                 config=config,
                 mode="online",
-                name='test_lln'
-                # name=os.path.basename(os.path.normpath(job_config.job.dump_folder))
+                name=os.path.basename(os.path.normpath(config.save_root)),
             )
+            if run.settings.mode != "online":
+                raise RuntimeError('Online W&B initialization did not succeed')
+            expected_run = os.environ.get('WANDB_RUN_ID')
+            if expected_run and run.id != expected_run:
+                raise RuntimeError('W&B run identity changed')
             logger.info("WandB logging enabled")
         self.step = 0
         self.config = config
@@ -75,6 +83,8 @@ class Trainer:
         logger.info("Loading transformer...")
 
         if hasattr(config, 'resume_from') and config.resume_from:
+            if not (Path(config.resume_from) / 'complete.json').is_file():
+                raise RuntimeError('Resume requires a completed full-state checkpoint')
             transformer_path = os.path.join(config.resume_from, 'transformer')
             if config.rank == 0:
                 logger.info(f"Resuming from checkpoint: {transformer_path}")
@@ -133,6 +143,7 @@ class Trainer:
             shuffle=(train_sampler is None), 
             num_workers=config.load_worker,
             sampler=train_sampler,
+            generator=torch.Generator().manual_seed(42 + config.rank),
         )
 
         self.train_scheduler_latent = FlowMatchScheduler(shift=self.config.snr_shift, sigma_min=0.0, extra_one_step=True)
@@ -145,23 +156,40 @@ class Trainer:
 
         self.gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
         self.train_loader_iter = None
-        # if hasattr(config, 'resume_from') and config.resume_from:
-        #     self._load_training_state(config.resume_from)
-    
+        self.data_epoch = 0
+        self.data_batches = 0
+        self.epoch_rng = None
+        if getattr(config, 'resume_from', None):
+            self._load_training_state(config.resume_from)
+
+    def _rng_state(self):
+        return dict(python=random.getstate(), numpy=np.random.get_state(),
+                    torch=torch.get_rng_state(), cuda=torch.cuda.get_rng_state(self.device))
+
+    def _restore_rng(self, state):
+        random.setstate(state['python'])
+        np.random.set_state(state['numpy'])
+        torch.set_rng_state(state['torch'])
+        torch.cuda.set_rng_state(state['cuda'], self.device)
+
+    def _start_data_epoch(self):
+        if hasattr(self.train_loader.sampler, 'set_epoch'):
+            self.train_loader.sampler.set_epoch(self.data_epoch)
+        self.epoch_rng = self._rng_state()
+        self.epoch_generator = self.train_loader.generator.get_state()
+        self.train_loader_iter = iter(self.train_loader)
+
     def _get_next_batch(self):
-        """Get next batch from iterator, reset if epoch is finished."""
         if self.train_loader_iter is None:
-            self.train_loader_iter = iter(self.train_loader)
-        
+            self._start_data_epoch()
         try:
             batch = next(self.train_loader_iter)
         except StopIteration:
-            # Reset sampler and iterator when epoch finishes
-            if hasattr(self.train_loader.sampler, 'set_epoch'):
-                self.train_loader.sampler.set_epoch(self.train_loader.sampler.epoch + 1)
-            self.train_loader_iter = iter(self.train_loader)
+            self.data_epoch += 1
+            self.data_batches = 0
+            self._start_data_epoch()
             batch = next(self.train_loader_iter)
-        
+        self.data_batches += 1
         return batch
 
     @torch.no_grad()
@@ -236,6 +264,7 @@ class Trainer:
             noisy_cond_prob=0.0)
 
         latent_dict['text_emb'] = batch_dict['text_emb']
+        latent_dict['latents_mask'] = batch_dict['latents_mask']
         action_dict['text_emb'] = batch_dict['text_emb']
         action_dict['actions_mask'] = batch_dict['actions_mask']
 
@@ -270,12 +299,14 @@ class Trainer:
         # Frame-wise video loss calculation
         latent_loss = F.mse_loss(latent_pred.float(), input_dict['latent_dict']['targets'].float().detach(), reduction='none')
         latent_loss = latent_loss * latent_loss_weight[:, None, :, None, None]
+        latent_mask = input_dict['latent_dict']['latents_mask'].float()
+        latent_loss = latent_loss * latent_mask
         # Permute to (B, F, H, W, C) and flatten to (B*F, H*W*C)
         latent_loss = latent_loss.permute(0, 2, 3, 4, 1)  # (B, C, F, H, W) -> (B, F, H, W, C)
         latent_loss = latent_loss.flatten(0, 1).flatten(1)  # (B, F, H, W, C) -> (B*F, H*W*C)
         # Sum per frame and compute mask per frame
         latent_loss_per_frame = latent_loss.sum(dim=1)  # (B*F,)
-        latent_mask_per_frame = torch.ones_like(latent_loss).sum(dim=1)  # (B*F,)
+        latent_mask_per_frame = latent_mask.permute(0, 2, 3, 4, 1).flatten(0, 1).flatten(1).sum(dim=1)
         latent_loss = (latent_loss_per_frame / (latent_mask_per_frame + 1e-6)).mean()
 
         # Frame-wise action loss calculation
@@ -328,96 +359,118 @@ class Trainer:
 
         return losses
 
-    def save_checkpoint(self,):
-        """Save model checkpoint in the same format as pretrained model."""
-        try:
-            state_dict = get_model_state_dict(
-                self.transformer,
-                options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-            )
-            state_dict_bf16 = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
-            # optim_state = get_optimizer_state_dict(
-            #         self.transformer, self.optimizer,
-            #         options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-            #     )
+    def _resume_contract(self):
+        # The same worker count is required to replay worker RNG and prefetch order.
+        return dict(world_size=self.config.world_size, batch_size=self.config.batch_size,
+                    workers=self.config.load_worker, accumulation=self.gradient_accumulation_steps,
+                    dataset_length=len(self.train_loader.dataset),
+                    config={k: str(v) for k, v in vars(self.config).items()
+                            if k not in {'rank', 'local_rank', 'resume_from', 'save_root',
+                                         'enable_wandb', 'save_interval'}})
 
-            # Only rank 0 saves the checkpoint
-            if self.config.rank == 0:
+    def save_checkpoint(self):
+        """Save FP32 master weights and full state at an optimizer boundary."""
+        if self.config.load_worker < 1:
+            raise RuntimeError('Exact data RNG resume requires at least one DataLoader worker')
+        if any(p.grad is not None for p in self.transformer.parameters()):
+            raise RuntimeError('Checkpoint must follow optimizer.step and zero_grad')
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        model_state = get_model_state_dict(self.transformer, options=options)
+        optim_state = get_optimizer_state_dict(self.transformer, self.optimizer, options=options)
+        local = dict(rng=self._rng_state(), epoch=self.data_epoch, batches=self.data_batches,
+                     epoch_rng=self.epoch_rng, epoch_generator=getattr(self, 'epoch_generator', None))
+        rank_states = [None] * self.config.world_size
+        if dist.is_initialized():
+            dist.all_gather_object(rank_states, local)
+        else:
+            rank_states[0] = local
+        error = [None]
+        if self.config.rank == 0:
+            try:
                 checkpoint_dir = self.save_dir / f"checkpoint_step_{self.step}"
-                checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-                # Save transformer in the same format as pretrained model
-                transformer_dir = checkpoint_dir / "transformer"
-                transformer_dir.mkdir(parents=True, exist_ok=True)
-
-                logger.info(f"Saving transformer to {transformer_dir}")
-
-                # Manually save in diffusers format (outside FSDP context to avoid deadlock)
-                # Save model weights
-                model_file = transformer_dir / "diffusion_pytorch_model.safetensors"
-                save_file(state_dict_bf16, model_file)
-
-                # Save config (copy from original transformer config and update _name_or_path)
-                config_file = transformer_dir / "config.json"
+                checkpoint_dir.mkdir(exist_ok=False)
+                transformer_dir = checkpoint_dir / 'transformer'
+                transformer_dir.mkdir()
+                # Preserve master precision; a bf16 export cannot provide exact continuation.
+                save_file({k: v.to(torch.bfloat16) for k, v in model_state.items()},
+                          transformer_dir / 'diffusion_pytorch_model.safetensors')
                 config_dict = dict(self.transformer.config)
                 config_dict.pop('_name_or_path', None)
-                with open(config_file, 'w') as f:
-                    json.dump(config_dict, f, indent=2)
-
-                # # Save optimizer state and training metadata in PyTorch format
-                # training_state_path = checkpoint_dir / "training_state.pt"
-                # logger.info(f"Saving training state to {training_state_path}")
-                # torch.save({
-                #     'step': self.step,
-                #     'optimizer_state_dict': optim_state,
-                #     'config': vars(self.config),
-                # }, training_state_path)
-
-                logger.info(f"Checkpoint saved successfully at step {self.step}")
-
-            # Synchronize all processes after saving
-            if dist.is_initialized():
-                dist.barrier()
-
-        except Exception as e:
-            if self.config.rank == 0:
-                logger.error(f"Failed to save checkpoint: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-            # Ensure all processes stay synchronized even on error
-            if dist.is_initialized():
-                dist.barrier()
+                (transformer_dir / 'config.json').write_text(json.dumps(config_dict))
+                torch.save(dict(step=self.step, model_state_dict=model_state, optimizer_state_dict=optim_state,
+                                scheduler=self.lr_scheduler.state_dict(), ranks=rank_states,
+                                contract=self._resume_contract()), checkpoint_dir / 'training_state.pt')
+                marker = checkpoint_dir / 'complete.json.tmp'
+                marker.write_text(json.dumps(dict(step=self.step, format_version=1)))
+                os.replace(marker, checkpoint_dir / 'complete.json')
+                # Retain the latest two completed exports and full recovery states.
+                completed = sorted(
+                    (p for p in self.save_dir.glob('checkpoint_step_*')
+                     if p.is_dir() and not p.is_symlink() and (p / 'complete.json').is_file()),
+                    key=lambda p: int(p.name.removeprefix('checkpoint_step_')),
+                )
+                for old in completed[:-2]:
+                    for payload in sorted(old.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+                        if payload.is_file() or payload.is_symlink():
+                            payload.unlink()
+                        elif payload.is_dir():
+                            payload.rmdir()
+                    old.rmdir()
+            except Exception as exc:
+                error[0] = repr(exc)
+        if dist.is_initialized():
+            dist.broadcast_object_list(error, src=0)
+        if error[0]:
+            raise RuntimeError(f'Checkpoint save failed: {error[0]}')
 
     def _load_training_state(self, checkpoint_path):
-        """Load training state (optimizer + step) after FSDP and optimizer creation."""
         checkpoint_dir = Path(checkpoint_path)
-        training_state_path = checkpoint_dir / "training_state.pt"
-
-        if not training_state_path.exists():
-            if self.config.rank == 0:
-                logger.warning(f"Training state not found: {training_state_path}, starting from step 0")
-            return
-
-        if self.config.rank == 0:
-            logger.info(f"Loading training state from {training_state_path}")
-
-        # All ranks load the training state directly
-        training_state = torch.load(training_state_path, map_location='cpu', weights_only=False)
-
-        # All ranks load optimizer state (required for FSDP)
-        set_optimizer_state_dict(
-            self.transformer, self.optimizer,
-            optim_state_dict=training_state['optimizer_state_dict'],
-            options=StateDictOptions(full_state_dict=True, strict=False)
-        )
-        self.step = training_state.get('step', 0)
-
-        if self.config.rank == 0:
-            logger.info(f"Training state loaded, resuming from step {self.step}")
-
-        # Synchronize all ranks
-        if dist.is_initialized():
-            dist.barrier()
+        if not (checkpoint_dir / 'complete.json').is_file():
+            raise RuntimeError('Incomplete checkpoint cannot be resumed')
+        state = torch.load(checkpoint_dir / 'training_state.pt', map_location='cpu', weights_only=False)
+        if state['contract'] != self._resume_contract():
+            raise RuntimeError('Resume config, world size or data contract changed')
+        set_model_state_dict(self.transformer, state['model_state_dict'],
+                             options=StateDictOptions(full_state_dict=True, strict=True))
+        optimizer_state = state['optimizer_state_dict']
+        parameter_names = {
+            param: name.replace('_checkpoint_wrapped_module.', '').replace('_orig_mod.', '')
+            for name, param in self.transformer.named_parameters()
+        }
+        if len(self.optimizer.param_groups) != len(optimizer_state['param_groups']):
+            raise RuntimeError('Resume optimizer parameter groups changed')
+        lazy_parameters = []
+        for current, saved in zip(self.optimizer.param_groups, optimizer_state['param_groups']):
+            if [parameter_names[p] for p in current['params']] != saved['params']:
+                raise RuntimeError('Resume optimizer parameter names or order changed')
+            for param in current['params']:
+                if parameter_names[param] not in optimizer_state['state'] and param.requires_grad:
+                    lazy_parameters.append(param)
+        # AdamW legitimately has no state for parameters that never received a
+        # gradient. Torch 2.9's DCP loader otherwise indexes these missing keys
+        # and initializes artificial moments. Exclude them only while loading.
+        try:
+            for param in lazy_parameters:
+                param.requires_grad_(False)
+                self.optimizer.state.pop(param, None)
+            set_optimizer_state_dict(self.transformer, self.optimizer,
+                                     optim_state_dict=optimizer_state,
+                                     options=StateDictOptions(full_state_dict=True, strict=True))
+        finally:
+            for param in lazy_parameters:
+                param.requires_grad_(True)
+        self.lr_scheduler.load_state_dict(state['scheduler'])
+        self.step = state['step']
+        local = state['ranks'][self.config.rank]
+        self.data_epoch, self.data_batches = local['epoch'], local['batches']
+        if local['epoch_rng'] is not None:
+            self._restore_rng(local['epoch_rng'])
+            self.train_loader.generator.set_state(local['epoch_generator'])
+            self._start_data_epoch()
+            for _ in range(self.data_batches):
+                next(self.train_loader_iter)
+        self._restore_rng(local['rng'])
+        logger.info(f'Full state restored at optimizer step {self.step}')
 
     def train(self):
         """Main training loop - train by steps instead of epochs."""

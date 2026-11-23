@@ -15,7 +15,7 @@ from XPolicyLab.utils.process_data import (
 
 
 POLICY_DIR = Path(__file__).resolve().parent
-FASTWAM_ROOT = POLICY_DIR / "FastWAM"
+FASTWAM_ROOT = Path(os.environ.get("FASTWAM_SOURCE_ROOT", POLICY_DIR / "FastWAM")).resolve()
 FASTWAM_SRC = FASTWAM_ROOT / "src"
 
 
@@ -95,6 +95,9 @@ class Model(ModelTemplate):
                 sys.path.insert(0, path)
 
         from experiments.robotwin.fastwam_policy.deploy_policy import get_model
+        import fastwam
+        if Path(fastwam.__file__).resolve().parent != FASTWAM_SRC / 'fastwam':
+            raise RuntimeError('FastWAM imported from a different source than FASTWAM_SOURCE_ROOT')
 
         upstream_cfg = dict(self.model_cfg)
         upstream_cfg["ckpt_setting"] = str(Path(checkpoint_path).expanduser().resolve())

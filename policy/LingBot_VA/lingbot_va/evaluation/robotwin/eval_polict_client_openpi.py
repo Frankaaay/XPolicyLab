@@ -1,3 +1,6 @@
+if __name__ == '__main__':
+    raise SystemExit('Use FastWAM-C2R/scripts/c2r/evaluate.py rollout --root OUTPUT with model=lingbot; independent RoboTwin sampling is disabled.')
+
 import sys
 import os
 import subprocess
